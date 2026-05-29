@@ -1,0 +1,23 @@
+[package]
+name = "locus"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "locus"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+noodles-bam = "0.72"
+noodles-sam = "0.68"
+noodles-core = "0.15"
+noodles-bgzf = "0.34"
+noodles-gff = "0.57"
+
+[profile.release]
+opt-level = 3
