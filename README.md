@@ -41,7 +41,7 @@ The BAM must be coordinate-sorted and indexed (`.bai` file beside it).
 | `g` | Go to region (e.g. `chr1:100000-200000`) |
 | `c` | Contig selector |
 | `r` | Refresh current region |
-| `s` | Save text screenshot to `screenshots/` |
+| `s` | Save ANSI text and HTML screenshots to `screenshots/` |
 | `?` | Toggle help overlay |
 | `Esc` | Cancel input |
 | `Enter` | Confirm input |

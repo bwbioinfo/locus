@@ -327,8 +327,12 @@ impl App {
 
     pub fn save_screenshot(&mut self) {
         match screenshot::save(self) {
-            Ok(path) => {
-                self.status_msg = Some(format!("screenshot: {}", path.display()));
+            Ok(paths) => {
+                self.status_msg = Some(format!(
+                    "screenshot: {} + {}",
+                    paths.text.display(),
+                    paths.html.display()
+                ));
             }
             Err(e) => {
                 self.status_msg = Some(format!("screenshot failed: {e}"));
