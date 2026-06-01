@@ -209,9 +209,9 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
     let keys = match app.mode {
         Mode::Normal => {
             if app.gff.is_some() {
-                " q:quit  ←/→:pan  H/L:big pan  ↑/↓ or +/-:zoom  g:goto  f:find gene  n/N:cycle  c:contigs  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
             } else {
-                " q:quit  ←/→:pan  H/L:big pan  ↑/↓ or +/-:zoom  g:goto  c:contigs  r:refresh  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
             }
         }
         Mode::GoTo => " Enter:confirm  Esc:cancel",
@@ -379,6 +379,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("  n / N      Cycle to next / previous feature match"),
         Line::from("  c          Contig selector"),
         Line::from("  r          Refresh current region"),
+        Line::from("  s          Save text screenshot to screenshots/"),
         Line::from("  ?          Toggle this help"),
         Line::from(""),
         Line::from("  In feature search overlay:"),

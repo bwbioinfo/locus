@@ -5,6 +5,7 @@ use crate::{
     cache::RegionCache,
     gff::GffStore,
     region::{Region, parse_region},
+    screenshot,
 };
 
 /// UI interaction mode.
@@ -322,6 +323,17 @@ impl App {
         self.needs_fetch = false;
         self.status_msg = None;
         Ok(())
+    }
+
+    pub fn save_screenshot(&mut self) {
+        match screenshot::save(self) {
+            Ok(path) => {
+                self.status_msg = Some(format!("screenshot: {}", path.display()));
+            }
+            Err(e) => {
+                self.status_msg = Some(format!("screenshot failed: {e}"));
+            }
+        }
     }
 
     // ─── Input handling ───────────────────────────────────────────────────────

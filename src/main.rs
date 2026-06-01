@@ -7,6 +7,7 @@ mod events;
 mod gff;
 mod region;
 mod render;
+mod screenshot;
 mod ui;
 
 use anyhow::{Context, Result};

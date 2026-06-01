@@ -78,6 +78,10 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
             app.needs_fetch = true;
         }
 
+        KeyCode::Char('s') => {
+            app.save_screenshot();
+        }
+
         _ => {}
     }
     Ok(())
