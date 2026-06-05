@@ -27,7 +27,7 @@ locus sample.bam
 locus sample.bam --region chr1:100000-101000
 locus sample.bam --region "chr1:1,000,000-1,001,000"
 
-# With a reference (reserved for future mismatch highlighting)
+# With a reference track and base-colored mismatches
 locus sample.bam --reference hg38.fa
 
 # With annotations for feature rendering and gene search
@@ -36,6 +36,7 @@ locus sample.bam --gff hg38.ncbiRefSeq.gtf.gz
 
 The BAM must be coordinate-sorted and indexed (`.bai` file beside it).
 Annotation files can be GFF3 or GTF, plain text or gzip/BGZF-compressed.
+Reference FASTA files use a `.fai` index when present; plain or gzip-compressed FASTA can also be loaded directly.
 
 ## Keybindings
 
@@ -83,7 +84,7 @@ Reads are colored by mapping quality:
 
 CIGAR operations:
 - `>` / `<` — alignment match (forward / reverse strand)
-- `X` — sequence mismatch
+- base-colored highlight — sequence mismatch against the reference
 - `I` — insertion into reference
 - `-` — deletion from reference
 - `~` — skip / intron (N)

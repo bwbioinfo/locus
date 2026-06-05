@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 use crate::cache::{CigarOp, PileupRow, RenderRead, Strand};
+use crate::reference::ReferenceSlice;
 
 use super::ViewTransform;
 
@@ -15,6 +16,7 @@ const BASE_RENDER_THRESHOLD: f64 = 5.0;
 pub struct ReadsTrack<'a> {
     pub reads: &'a [RenderRead],
     pub rows: &'a [PileupRow],
+    pub reference: Option<&'a ReferenceSlice>,
     pub transform: ViewTransform,
     #[allow(dead_code)]
     pub show_names: bool,
@@ -39,7 +41,7 @@ impl<'a> Widget for ReadsTrack<'a> {
                     continue;
                 };
                 if show_bases {
-                    render_bases(read, y, area, &self.transform, buf);
+                    render_bases(read, self.reference, y, area, &self.transform, buf);
                 } else {
                     render_arrows(read, y, area, &self.transform, buf);
                 }
@@ -53,6 +55,7 @@ impl<'a> Widget for ReadsTrack<'a> {
 /// Walk the CIGAR, rendering actual bases at reference positions.
 fn render_bases(
     read: &RenderRead,
+    reference: Option<&ReferenceSlice>,
     y: u16,
     area: Rect,
     transform: &ViewTransform,
@@ -72,12 +75,14 @@ fn render_bases(
                 let is_mismatch_op = matches!(op, CigarOp::Mismatch(_));
                 for _ in 0..n {
                     let base = read.sequence.get(read_pos).copied().unwrap_or(b'N');
-                    let style = if is_mismatch_op {
-                        // CIGAR explicitly marks mismatch
-                        mismatch_style(base)
-                    } else {
-                        match_style(base, read.mapq, read.is_secondary || read.is_supplementary)
-                    };
+                    let ref_base = reference.and_then(|reference| reference.base_at(ref_pos));
+                    let style = aligned_base_style(
+                        base,
+                        ref_base,
+                        is_mismatch_op,
+                        read.mapq,
+                        read.is_secondary || read.is_supplementary,
+                    );
                     draw_at_ref_pos(ref_pos, y, base as char, style, area, transform, buf);
                     read_pos += 1;
                     ref_pos += 1;
@@ -203,6 +208,29 @@ fn arrow_op_style(op: &CigarOp, read: &RenderRead) -> (Style, char) {
 // ─── Style helpers ────────────────────────────────────────────────────────────
 
 /// Style for a matched base: color by nucleotide identity, dim if low mapq.
+fn aligned_base_style(
+    base: u8,
+    ref_base: Option<u8>,
+    is_mismatch_op: bool,
+    mapq: u8,
+    dim: bool,
+) -> Style {
+    if is_mismatch_op || ref_base.is_some_and(|ref_base| bases_mismatch(base, ref_base)) {
+        mismatch_style(base)
+    } else {
+        match_style(base, mapq, dim)
+    }
+}
+
+fn bases_mismatch(base: u8, ref_base: u8) -> bool {
+    let base = base.to_ascii_uppercase();
+    let ref_base = ref_base.to_ascii_uppercase();
+    matches!(base, b'A' | b'C' | b'G' | b'T')
+        && matches!(ref_base, b'A' | b'C' | b'G' | b'T')
+        && base != ref_base
+}
+
+/// Style for a matched base: color by nucleotide identity, dim if low mapq.
 fn match_style(base: u8, mapq: u8, dim: bool) -> Style {
     let fg = base_color(base);
     // Background hint based on mapq so you can tell low-quality reads apart
@@ -256,5 +284,28 @@ fn strand_char(strand: Strand) -> char {
     match strand {
         Strand::Forward => '>',
         Strand::Reverse => '<',
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bases_mismatch_only_for_canonical_base_differences() {
+        assert!(!bases_mismatch(b'A', b'a'));
+        assert!(bases_mismatch(b'A', b'C'));
+        assert!(!bases_mismatch(b'N', b'A'));
+        assert!(!bases_mismatch(b'A', b'N'));
+    }
+
+    #[test]
+    fn reference_difference_uses_mismatch_style() {
+        let style = aligned_base_style(b'A', Some(b'C'), false, 60, false);
+        assert_eq!(style.bg, Some(Color::Green));
+
+        let style = aligned_base_style(b'A', Some(b'A'), false, 60, false);
+        assert_eq!(style.bg, Some(Color::Reset));
+        assert_eq!(style.fg, Some(Color::Green));
     }
 }

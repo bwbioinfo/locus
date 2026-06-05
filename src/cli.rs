@@ -14,7 +14,7 @@ pub struct Args {
     #[arg(long, short = 'a')]
     pub gff: Option<String>,
 
-    /// Reference FASTA (optional, reserved for future use)
+    /// Reference FASTA for the reference track and mismatch coloring
     #[arg(long, short = 'f')]
     pub reference: Option<String>,
 }

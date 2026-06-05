@@ -9,7 +9,7 @@ use ratatui::{
 use crate::app::{App, Mode};
 use crate::render::{
     ViewTransform, coverage::CoverageTrack, features::FeaturesTrack, reads::ReadsTrack,
-    ruler::Ruler,
+    reference::ReferenceTrack, ruler::Ruler,
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -128,13 +128,17 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     let transform = ViewTransform::new(app.view_start, app.view_end, area.width.saturating_sub(2));
 
     let ruler_h = 2u16;
+    let reference_h: u16 = if app.reference.is_some() { 1 } else { 0 };
     let features_h: u16 = if app.gff.is_some() { 4 } else { 0 };
     let coverage_h = 3u16.min(area.height / 5);
     let reads_h = area
         .height
-        .saturating_sub(ruler_h + features_h + coverage_h);
+        .saturating_sub(ruler_h + reference_h + features_h + coverage_h);
 
     let mut constraints = vec![Constraint::Length(ruler_h)];
+    if reference_h > 0 {
+        constraints.push(Constraint::Length(reference_h));
+    }
     if features_h > 0 {
         constraints.push(Constraint::Length(features_h));
     }
@@ -151,6 +155,17 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     // Ruler
     frame.render_widget(Ruler { transform }, chunks[chunk_idx]);
     chunk_idx += 1;
+
+    if reference_h > 0 {
+        frame.render_widget(
+            ReferenceTrack {
+                reference: app.cache.reference.as_ref(),
+                transform,
+            },
+            chunks[chunk_idx],
+        );
+        chunk_idx += 1;
+    }
 
     // Features track (only when GFF loaded)
     if let Some(ref gff) = app.gff {
@@ -183,6 +198,7 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
         ReadsTrack {
             reads: &app.cache.reads,
             rows: &app.cache.pileup_rows,
+            reference: app.cache.reference.as_ref(),
             transform,
             show_names,
         },
@@ -391,8 +407,11 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from("  Read colors:"),
         Line::from("    Green   MAPQ ≥ 60  Yellow  MAPQ ≥ 10  Gray  MAPQ < 10"),
+        Line::from(
+            "    Reference mismatches use base-colored bold backgrounds when --reference is loaded",
+        ),
         Line::from(""),
-        Line::from("  CIGAR:  > / <  match   X  mismatch   I  ins   -  del   ~  skip   S  clip"),
+        Line::from("  CIGAR:  > / <  match   base highlight  mismatch   I  ins   -  del   ~  skip"),
         Line::from(""),
         Line::from("  Feature colors:"),
         Line::from("    Green  gene   Yellow  mRNA/transcript   Cyan  exon   Blue  CDS"),

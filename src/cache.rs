@@ -1,4 +1,4 @@
-use crate::region::Region;
+use crate::{reference::ReferenceSlice, region::Region};
 
 /// Strand of a read alignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +74,8 @@ pub struct RegionCache {
     pub pileup_rows: Vec<PileupRow>,
     /// Per-column coverage histogram (length == terminal_cols).
     pub coverage: CoverageBins,
+    /// Reference bases for the padded region, when a FASTA was supplied.
+    pub reference: Option<ReferenceSlice>,
     /// How many reads were hidden because pileup depth was exceeded.
     pub hidden_reads: usize,
 }
@@ -85,6 +87,7 @@ impl RegionCache {
         self.reads.clear();
         self.pileup_rows.clear();
         self.coverage.clear();
+        self.reference = None;
         self.hidden_reads = 0;
     }
 

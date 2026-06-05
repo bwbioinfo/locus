@@ -4,6 +4,7 @@ use crate::{
     bam::BamSource,
     cache::RegionCache,
     gff::GffStore,
+    reference::ReferenceStore,
     region::{Region, parse_region},
     screenshot,
 };
@@ -30,6 +31,7 @@ pub struct App {
     pub source: BamSource,
     pub cache: RegionCache,
     pub gff: Option<GffStore>,
+    pub reference: Option<ReferenceStore>,
 
     // --- browser state ---
     pub contig_idx: usize,
@@ -64,6 +66,7 @@ impl App {
     pub fn new(
         source: BamSource,
         gff: Option<GffStore>,
+        reference: Option<ReferenceStore>,
         initial_region: Option<Region>,
     ) -> Result<Self> {
         let (view_start, view_end) = if let Some(ref r) = initial_region {
@@ -92,6 +95,7 @@ impl App {
             source,
             cache: RegionCache::default(),
             gff,
+            reference,
             contig_idx,
             view_start,
             view_end,
@@ -197,7 +201,10 @@ impl App {
     /// Re-layout pileup and coverage from the already-loaded reads (no disk IO).
     pub fn relayout(&mut self) {
         let visible = self.current_region();
-        let max_rows = self.terminal_rows.saturating_sub(12) as usize;
+        let reference_rows = usize::from(self.reference.is_some());
+        let max_rows = self
+            .terminal_rows
+            .saturating_sub(12 + reference_rows as u16) as usize;
         let cols = self.view_cols();
         self.cache.layout_pileup(&visible, max_rows.max(1));
         self.cache.compute_coverage(&visible, cols.max(1));
@@ -312,10 +319,18 @@ impl App {
             e
         })?;
 
-        let max_pileup_rows = self.terminal_rows.saturating_sub(12) as usize;
+        let reference_rows = usize::from(self.reference.is_some());
+        let max_pileup_rows = self
+            .terminal_rows
+            .saturating_sub(12 + reference_rows as u16) as usize;
         let view_cols = self.view_cols();
 
         self.cache.reads = reads;
+        self.cache.reference = if let Some(reference) = self.reference.as_ref() {
+            reference.fetch(&padded)?
+        } else {
+            None
+        };
         self.cache.loaded_region = Some(padded);
         self.cache.layout_pileup(&visible, max_pileup_rows.max(1));
         self.cache.compute_coverage(&visible, view_cols.max(1));

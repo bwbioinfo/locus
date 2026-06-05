@@ -1,6 +1,7 @@
 pub mod coverage;
 pub mod features;
 pub mod reads;
+pub mod reference;
 pub mod ruler;
 
 /// Maps between genomic coordinates and terminal columns.

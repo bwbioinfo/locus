@@ -5,6 +5,7 @@ mod cli;
 mod error;
 mod events;
 mod gff;
+mod reference;
 mod region;
 mod render;
 mod screenshot;
@@ -23,6 +24,7 @@ use app::App;
 use bam::BamSource;
 use cli::Args;
 use gff::GffStore;
+use reference::ReferenceStore;
 use region::parse_region;
 
 fn main() -> Result<()> {
@@ -44,7 +46,13 @@ fn main() -> Result<()> {
         None
     };
 
-    let mut app = App::new(source, gff, initial_region)?;
+    let reference = if let Some(ref path) = args.reference {
+        Some(ReferenceStore::load(path).with_context(|| format!("loading reference {path}"))?)
+    } else {
+        None
+    };
+
+    let mut app = App::new(source, gff, reference, initial_region)?;
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
