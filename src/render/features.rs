@@ -98,7 +98,13 @@ impl<'a> Widget for FeaturesTrack<'a> {
         for model in &models {
             items.push(FeatureRenderItem::Model(model));
         }
-        items.sort_by_key(|item| (item.priority(), item.start()));
+        items.sort_by(|a, b| {
+            a.priority()
+                .cmp(&b.priority())
+                .then_with(|| a.start().cmp(&b.start()))
+                .then_with(|| a.end().cmp(&b.end()))
+                .then_with(|| a.sort_name().cmp(b.sort_name()))
+        });
 
         for item in items {
             let (col_start, col_end) = self.transform.bp_range_to_cols(item.start(), item.end());
@@ -161,6 +167,13 @@ impl FeatureRenderItem<'_> {
             FeatureRenderItem::Model(model) => model.end,
         }
     }
+
+    fn sort_name(&self) -> &str {
+        match self {
+            FeatureRenderItem::Feature(feature) => feature.display_name(),
+            FeatureRenderItem::Model(model) => &model.key,
+        }
+    }
 }
 
 fn build_feature_models<'a>(features: &'a [&'a GffFeature]) -> Vec<FeatureModel<'a>> {
@@ -214,7 +227,7 @@ fn build_feature_models<'a>(features: &'a [&'a GffFeature]) -> Vec<FeatureModel<
             )
         });
     }
-    models.sort_by_key(|model| (model.start, model.end));
+    models.sort_by_key(|model| (model.start, model.end, model.key.clone()));
     models
 }
 
@@ -233,9 +246,17 @@ fn grouped_block_key(feature: &GffFeature, id_counts: &HashMap<&str, usize>) -> 
 }
 
 fn should_skip_grouped_feature(feature: &GffFeature, grouped_keys: &HashSet<&str>) -> bool {
-    let can_be_represented_by_model =
-        is_block_feature(&feature.feature_type) || is_intron_backbone(&feature.feature_type);
-    if !can_be_represented_by_model {
+    if is_block_feature(&feature.feature_type) {
+        return feature
+            .id
+            .as_deref()
+            .into_iter()
+            .chain(feature.parent.as_deref())
+            .chain(feature.gene_name.as_deref())
+            .any(|key| grouped_keys.contains(key));
+    }
+
+    if !is_intron_backbone(&feature.feature_type) {
         return false;
     }
 
@@ -244,7 +265,6 @@ fn should_skip_grouped_feature(feature: &GffFeature, grouped_keys: &HashSet<&str
         .as_deref()
         .into_iter()
         .chain(feature.parent.as_deref())
-        .chain(feature.gene_name.as_deref())
         .any(|key| grouped_keys.contains(key))
 }
 
@@ -439,6 +459,36 @@ mod tests {
         let grouped_keys: HashSet<&str> = models.iter().map(|model| model.key.as_str()).collect();
 
         assert!(should_skip_grouped_feature(&transcript, &grouped_keys));
+        assert!(should_skip_grouped_feature(&exon_a, &grouped_keys));
+    }
+
+    #[test]
+    fn feature_models_have_deterministic_tie_breakers() {
+        let tx2_a = feature("exon", 100, 150, Some("TX2"), Some("GENE1"), Some("TPTE2"));
+        let tx2_b = feature("exon", 300, 350, Some("TX2"), Some("GENE1"), Some("TPTE2"));
+        let tx1_a = feature("exon", 100, 150, Some("TX1"), Some("GENE1"), Some("TPTE2"));
+        let tx1_b = feature("exon", 300, 350, Some("TX1"), Some("GENE1"), Some("TPTE2"));
+        let features = vec![&tx2_a, &tx2_b, &tx1_a, &tx1_b];
+
+        let models = build_feature_models(&features);
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].key, "TX1");
+        assert_eq!(models[1].key, "TX2");
+    }
+
+    #[test]
+    fn gene_name_grouped_blocks_do_not_hide_gene_rows() {
+        let gene = feature("gene", 100, 350, Some("GENE1"), None, Some("TPTE2"));
+        let exon_a = feature("exon", 100, 150, None, None, Some("TPTE2"));
+        let exon_b = feature("exon", 300, 350, None, None, Some("TPTE2"));
+        let features = vec![&gene, &exon_a, &exon_b];
+        let models = build_feature_models(&features);
+        let grouped_keys: HashSet<&str> = models.iter().map(|model| model.key.as_str()).collect();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].key, "TPTE2");
+        assert!(!should_skip_grouped_feature(&gene, &grouped_keys));
         assert!(should_skip_grouped_feature(&exon_a, &grouped_keys));
     }
 
