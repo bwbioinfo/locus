@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -8,6 +10,8 @@ use ratatui::{
 use crate::gff::GffFeature;
 
 use super::ViewTransform;
+
+use crate::cache::Strand;
 
 /// Color scheme for feature types.
 fn feature_color(ty: &str) -> Color {
@@ -54,22 +58,50 @@ pub struct FeaturesTrack<'a> {
     pub transform: ViewTransform,
 }
 
+#[derive(Debug)]
+struct FeatureBlock<'a> {
+    feature_type: &'a str,
+    start: u64,
+    end: u64,
+}
+
+#[derive(Debug)]
+struct FeatureModel<'a> {
+    key: String,
+    name: &'a str,
+    strand: Option<Strand>,
+    start: u64,
+    end: u64,
+    blocks: Vec<FeatureBlock<'a>>,
+}
+
 impl<'a> Widget for FeaturesTrack<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.height == 0 || area.width == 0 || self.features.is_empty() {
             return;
         }
 
+        let models = build_feature_models(self.features);
+        let grouped_keys: HashSet<&str> = models.iter().map(|model| model.key.as_str()).collect();
+
         // Lay features into rows (greedy packing, same algorithm as reads).
-        let mut rows: Vec<Vec<&&GffFeature>> = Vec::new();
+        let mut rows: Vec<Vec<FeatureRenderItem<'_>>> = Vec::new();
         let mut row_ends: Vec<u16> = Vec::new();
 
-        // Sort by priority then start
-        let mut sorted: Vec<&&GffFeature> = self.features.iter().collect();
-        sorted.sort_by_key(|f| (feature_priority(f.feature_type.as_str()), f.start));
+        let mut items = Vec::new();
+        for feature in self.features {
+            if should_skip_grouped_feature(feature, &grouped_keys) {
+                continue;
+            }
+            items.push(FeatureRenderItem::Feature(feature));
+        }
+        for model in &models {
+            items.push(FeatureRenderItem::Model(model));
+        }
+        items.sort_by_key(|item| (item.priority(), item.start()));
 
-        for feat in &sorted {
-            let (col_start, col_end) = self.transform.bp_range_to_cols(feat.start, feat.end);
+        for item in items {
+            let (col_start, col_end) = self.transform.bp_range_to_cols(item.start(), item.end());
             let target = row_ends
                 .iter()
                 .position(|&end| col_start >= end + 1)
@@ -82,15 +114,210 @@ impl<'a> Widget for FeaturesTrack<'a> {
                 rows.push(Vec::new());
                 row_ends.push(0);
             }
-            rows[target].push(feat);
+            rows[target].push(item);
             row_ends[target] = col_end;
         }
 
         for (row_idx, row) in rows.iter().enumerate() {
             let y = area.y + row_idx as u16;
-            for feat in row {
-                render_feature(feat, y, area, &self.transform, buf);
+            for item in row {
+                match item {
+                    FeatureRenderItem::Feature(feature) => {
+                        render_feature(feature, y, area, &self.transform, buf);
+                    }
+                    FeatureRenderItem::Model(model) => {
+                        render_model(model, y, area, &self.transform, buf);
+                    }
+                }
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FeatureRenderItem<'a> {
+    Feature(&'a GffFeature),
+    Model(&'a FeatureModel<'a>),
+}
+
+impl FeatureRenderItem<'_> {
+    fn priority(&self) -> u8 {
+        match self {
+            FeatureRenderItem::Feature(feature) => feature_priority(&feature.feature_type),
+            FeatureRenderItem::Model(_) => 1,
+        }
+    }
+
+    fn start(&self) -> u64 {
+        match self {
+            FeatureRenderItem::Feature(feature) => feature.start,
+            FeatureRenderItem::Model(model) => model.start,
+        }
+    }
+
+    fn end(&self) -> u64 {
+        match self {
+            FeatureRenderItem::Feature(feature) => feature.end,
+            FeatureRenderItem::Model(model) => model.end,
+        }
+    }
+}
+
+fn build_feature_models<'a>(features: &'a [&'a GffFeature]) -> Vec<FeatureModel<'a>> {
+    let mut id_counts: HashMap<&str, usize> = HashMap::new();
+    for feature in features {
+        if is_block_feature(&feature.feature_type) {
+            if let Some(id) = feature.id.as_deref() {
+                *id_counts.entry(id).or_default() += 1;
+            }
+        }
+    }
+
+    let mut models: HashMap<String, FeatureModel<'a>> = HashMap::new();
+    for feature in features {
+        if !is_block_feature(&feature.feature_type) {
+            continue;
+        }
+        let Some(key) = grouped_block_key(feature, &id_counts) else {
+            continue;
+        };
+        let model = models.entry(key.clone()).or_insert_with(|| FeatureModel {
+            key,
+            name: feature.display_name(),
+            strand: feature.strand,
+            start: feature.start,
+            end: feature.end,
+            blocks: Vec::new(),
+        });
+        model.start = model.start.min(feature.start);
+        model.end = model.end.max(feature.end);
+        if model.strand.is_none() {
+            model.strand = feature.strand;
+        }
+        model.blocks.push(FeatureBlock {
+            feature_type: &feature.feature_type,
+            start: feature.start,
+            end: feature.end,
+        });
+    }
+
+    let mut models: Vec<_> = models
+        .into_values()
+        .filter(|model| model.blocks.len() > 1)
+        .collect();
+    for model in &mut models {
+        model.blocks.sort_by_key(|block| {
+            (
+                block.start,
+                block.end,
+                block_draw_priority(block.feature_type),
+            )
+        });
+    }
+    models.sort_by_key(|model| (model.start, model.end));
+    models
+}
+
+fn grouped_block_key(feature: &GffFeature, id_counts: &HashMap<&str, usize>) -> Option<String> {
+    let id = feature.id.as_deref();
+    if id.and_then(|id| id_counts.get(id)).copied().unwrap_or(0) > 1 {
+        id.map(str::to_string)
+    } else {
+        feature
+            .parent
+            .as_deref()
+            .or(id)
+            .or(feature.gene_name.as_deref())
+            .map(str::to_string)
+    }
+}
+
+fn should_skip_grouped_feature(feature: &GffFeature, grouped_keys: &HashSet<&str>) -> bool {
+    let can_be_represented_by_model =
+        is_block_feature(&feature.feature_type) || is_intron_backbone(&feature.feature_type);
+    if !can_be_represented_by_model {
+        return false;
+    }
+
+    feature
+        .id
+        .as_deref()
+        .into_iter()
+        .chain(feature.parent.as_deref())
+        .chain(feature.gene_name.as_deref())
+        .any(|key| grouped_keys.contains(key))
+}
+
+fn block_draw_priority(ty: &str) -> u8 {
+    match ty {
+        "exon" => 0,
+        "UTR" | "five_prime_UTR" | "three_prime_UTR" => 1,
+        "CDS" | "start_codon" | "stop_codon" => 2,
+        _ => 3,
+    }
+}
+
+fn is_block_feature(ty: &str) -> bool {
+    matches!(
+        ty,
+        "exon"
+            | "CDS"
+            | "start_codon"
+            | "stop_codon"
+            | "UTR"
+            | "five_prime_UTR"
+            | "three_prime_UTR"
+    )
+}
+
+fn render_model(
+    model: &FeatureModel<'_>,
+    y: u16,
+    area: Rect,
+    transform: &ViewTransform,
+    buf: &mut Buffer,
+) {
+    let pseudo_feature = GffFeature {
+        seqname: String::new(),
+        feature_type: "transcript".to_string(),
+        start: model.start,
+        end: model.end,
+        strand: model.strand,
+        id: Some(model.key.clone()),
+        name: Some(model.name.to_string()),
+        parent: None,
+        gene_name: None,
+    };
+
+    render_feature(&pseudo_feature, y, area, transform, buf);
+
+    for block in &model.blocks {
+        render_block(block, y, area, transform, buf);
+    }
+}
+
+fn render_block(
+    block: &FeatureBlock<'_>,
+    y: u16,
+    area: Rect,
+    transform: &ViewTransform,
+    buf: &mut Buffer,
+) {
+    let (col_start, col_end) = transform.bp_range_to_cols(block.start, block.end);
+    let x_start = area.x + col_start;
+    let x_end = (area.x + col_end).min(area.x + area.width);
+    if x_start >= x_end {
+        return;
+    }
+
+    let style = Style::default()
+        .fg(Color::Black)
+        .bg(feature_color(block.feature_type))
+        .add_modifier(Modifier::BOLD);
+    let ch = feature_glyph(block.feature_type);
+    for x in x_start..x_end {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_char(ch).set_style(style);
         }
     }
 }
@@ -155,8 +382,6 @@ fn render_feature(
 }
 
 fn intron_backbone_char(feat: &GffFeature, offset: u16) -> char {
-    use crate::cache::Strand;
-
     if offset % 6 != 3 {
         return '─';
     }
@@ -177,7 +402,64 @@ mod tests {
         assert_eq!(feature_glyph("exon"), '█');
         assert_eq!(feature_glyph("CDS"), '▓');
         assert_eq!(feature_glyph("transcript"), '─');
+        assert!(is_block_feature("exon"));
         assert!(is_intron_backbone("transcript"));
         assert!(!is_intron_backbone("exon"));
+    }
+
+    #[test]
+    fn repeated_gtf_transcript_ids_form_one_model() {
+        let exon_a = feature("exon", 100, 150, Some("TX1"), Some("GENE1"), Some("TPTE2"));
+        let exon_b = feature("exon", 300, 350, Some("TX1"), Some("GENE1"), Some("TPTE2"));
+        let features = vec![&exon_a, &exon_b];
+
+        let models = build_feature_models(&features);
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].key, "TX1");
+        assert_eq!(models[0].start, 100);
+        assert_eq!(models[0].end, 350);
+        assert_eq!(models[0].blocks.len(), 2);
+    }
+
+    #[test]
+    fn grouped_transcript_record_is_not_rendered_twice() {
+        let transcript = feature(
+            "transcript",
+            100,
+            350,
+            Some("TX1"),
+            Some("GENE1"),
+            Some("TPTE2"),
+        );
+        let exon_a = feature("exon", 100, 150, Some("TX1"), Some("GENE1"), Some("TPTE2"));
+        let exon_b = feature("exon", 300, 350, Some("TX1"), Some("GENE1"), Some("TPTE2"));
+        let features = vec![&transcript, &exon_a, &exon_b];
+        let models = build_feature_models(&features);
+        let grouped_keys: HashSet<&str> = models.iter().map(|model| model.key.as_str()).collect();
+
+        assert!(should_skip_grouped_feature(&transcript, &grouped_keys));
+        assert!(should_skip_grouped_feature(&exon_a, &grouped_keys));
+    }
+
+    fn feature(
+        feature_type: &str,
+        start: u64,
+        end: u64,
+        id: Option<&str>,
+        parent: Option<&str>,
+        name: Option<&str>,
+    ) -> GffFeature {
+        GffFeature {
+            seqname: "chr1".to_string(),
+            feature_type: feature_type.to_string(),
+            start,
+            end,
+            strand: Some(Strand::Forward),
+            id: id.map(str::to_string),
+            name: name.map(str::to_string),
+            parent: parent.map(str::to_string),
+            gene_name: name.map(str::to_string),
+        }
     }
 }
