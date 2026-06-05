@@ -2,6 +2,18 @@
 name = "locus"
 version = "0.1.0"
 edition = "2024"
+description = "A terminal genome browser for BAM files"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/bwbioinfo/locus"
+keywords = ["genomics", "bioinformatics", "bam", "gtf", "gff"]
+categories = ["science", "command-line-utilities"]
+include = [
+    "/Cargo.toml",
+    "/LICENSE",
+    "/README.md",
+    "/src/**",
+]
 
 [[bin]]
 name = "locus"

@@ -1,5 +1,6 @@
 /target
 screenshots/
+.codex/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
