@@ -5,6 +5,12 @@ A fast terminal genome browser for BAM files.
 ## Install
 
 ```bash
+cargo install locus-tui
+```
+
+For local development:
+
+```bash
 cargo build --release
 # binary at target/release/locus
 ```
