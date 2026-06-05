@@ -10,7 +10,7 @@ pub struct Args {
     #[arg(long, short)]
     pub region: Option<String>,
 
-    /// GFF3 annotation file for feature track and gene search
+    /// GFF3/GTF annotation file for feature track and gene search
     #[arg(long, short = 'a')]
     pub gff: Option<String>,
 

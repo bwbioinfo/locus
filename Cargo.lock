@@ -489,6 +489,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "flate2",
  "noodles-bam",
  "noodles-bgzf 0.34.0",
  "noodles-core 0.15.0",

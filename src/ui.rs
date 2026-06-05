@@ -379,7 +379,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("  n / N      Cycle to next / previous feature match"),
         Line::from("  c          Contig selector"),
         Line::from("  r          Refresh current region"),
-        Line::from("  s          Save text screenshot to screenshots/"),
+        Line::from("  s          Save ANSI text and HTML screenshots to screenshots/"),
         Line::from("  ?          Toggle this help"),
         Line::from(""),
         Line::from("  In feature search overlay:"),

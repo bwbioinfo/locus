@@ -1,16 +1,17 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{BufRead, BufReader},
+    io::{self, BufRead, BufReader, Read},
     path::Path,
 };
 
 use anyhow::{Context, Result};
+use flate2::read::MultiGzDecoder;
 
 use crate::cache::Strand;
 use crate::region::Region;
 
-/// A single GFF3 feature record (normalised to 0-based half-open coordinates).
+/// A single GFF3/GTF feature record (normalised to 0-based half-open coordinates).
 #[derive(Debug, Clone)]
 pub struct GffFeature {
     pub seqname: String,
@@ -20,11 +21,11 @@ pub struct GffFeature {
     /// 0-based exclusive end
     pub end: u64,
     pub strand: Option<Strand>,
-    /// GFF3 ID= attribute
+    /// GFF3 ID= attribute or GTF gene_id/transcript_id fallback
     pub id: Option<String>,
-    /// GFF3 Name= attribute
+    /// GFF3 Name= attribute or GTF gene_name fallback
     pub name: Option<String>,
-    /// GFF3 Parent= attribute (first value if multi-valued)
+    /// GFF3 Parent= attribute or GTF parent-like fallback
     #[allow(dead_code)]
     pub parent: Option<String>,
     /// gene_name= / gene= fallback
@@ -47,7 +48,7 @@ impl GffFeature {
     }
 }
 
-/// Holds all parsed GFF3 features with lookup indices.
+/// Holds all parsed GFF3/GTF features with lookup indices.
 pub struct GffStore {
     pub features: Vec<GffFeature>,
     /// lowercase-name → feature indices for fast search
@@ -55,16 +56,17 @@ pub struct GffStore {
 }
 
 impl GffStore {
-    /// Load a GFF3 (or GFF2/GTF-like) file. Comment lines and FASTA sections are skipped.
+    /// Load a GFF3/GTF file. Plain text, gzip, and BGZF streams are supported.
+    /// Comment lines and embedded FASTA sections are skipped.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let file =
-            File::open(path).with_context(|| format!("opening GFF file {}", path.display()))?;
+        let reader = open_annotation_reader(path)
+            .with_context(|| format!("opening annotation file {}", path.display()))?;
 
         let mut features = Vec::new();
         let mut in_fasta = false;
 
-        for line_result in BufReader::new(file).lines() {
+        for line_result in reader.lines() {
             let line = line_result?;
             let trimmed = line.trim();
 
@@ -76,7 +78,7 @@ impl GffStore {
                 continue;
             }
 
-            if let Some(feat) = parse_gff3_line(trimmed) {
+            if let Some(feat) = parse_feature_line(trimmed) {
                 features.push(feat);
             }
         }
@@ -144,7 +146,25 @@ impl GffStore {
 
 // ─── Parsing ─────────────────────────────────────────────────────────────────
 
-fn parse_gff3_line(line: &str) -> Option<GffFeature> {
+fn open_annotation_reader(path: &Path) -> io::Result<Box<dyn BufRead>> {
+    let file = File::open(path)?;
+    let reader: Box<dyn Read> = if is_gzip_like(path) {
+        Box::new(MultiGzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+
+    Ok(Box::new(BufReader::new(reader)))
+}
+
+fn is_gzip_like(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "gz" | "bgz" | "bgzip"))
+        .unwrap_or(false)
+}
+
+fn parse_feature_line(line: &str) -> Option<GffFeature> {
     let fields: Vec<&str> = line.splitn(9, '\t').collect();
     if fields.len() < 8 {
         return None;
@@ -187,7 +207,7 @@ fn parse_gff3_line(line: &str) -> Option<GffFeature> {
     })
 }
 
-/// Extract ID, Name, Parent, and gene_name/gene from a GFF3 attributes string.
+/// Extract ID, Name, Parent, and gene_name/gene from GFF3 or GTF attributes.
 fn parse_attributes(
     attrs: &str,
 ) -> (
@@ -200,18 +220,17 @@ fn parse_attributes(
     let mut name = None;
     let mut parent = None;
     let mut gene_name = None;
+    let mut gene_id = None;
+    let mut transcript_id = None;
 
     for kv in attrs.split(';') {
         let kv = kv.trim();
         if kv.is_empty() {
             continue;
         }
-        let eq = match kv.find('=') {
-            Some(i) => i,
-            None => continue,
+        let Some((key, val)) = parse_attribute_pair(kv) else {
+            continue;
         };
-        let key = kv[..eq].trim();
-        let val = percent_decode(kv[eq + 1..].trim());
 
         // take only the first value if comma-separated
         let first_val = val.split(',').next().unwrap_or("").to_string();
@@ -221,20 +240,61 @@ fn parse_attributes(
             first_val
         };
 
-        match key {
+        match key.as_str() {
             "ID" => id = Some(first_val),
             "Name" => name = Some(first_val),
             "Parent" => parent = Some(first_val),
-            "gene_name" | "gene" | "gene_id" => {
-                if gene_name.is_none() {
-                    gene_name = Some(first_val);
-                }
+            "gene_id" => {
+                gene_id.get_or_insert(first_val);
+            }
+            "transcript_id" => {
+                transcript_id.get_or_insert(first_val);
+            }
+            "gene_name" | "gene" => {
+                gene_name.get_or_insert(first_val.clone());
+                name.get_or_insert(first_val);
             }
             _ => {}
         }
     }
 
+    if id.is_none() {
+        id = transcript_id.clone().or_else(|| gene_id.clone());
+    }
+    if parent.is_none() {
+        parent = gene_id.clone();
+    }
+    if gene_name.is_none() {
+        gene_name = gene_id;
+    }
+
     (id, name, parent, gene_name)
+}
+
+fn parse_attribute_pair(kv: &str) -> Option<(String, String)> {
+    if let Some(eq) = kv.find('=') {
+        let key = kv[..eq].trim();
+        let val = clean_attribute_value(kv[eq + 1..].trim());
+        return Some((key.to_string(), val));
+    }
+
+    let mut parts = kv.splitn(2, char::is_whitespace);
+    let key = parts.next()?.trim();
+    let val = parts.next()?.trim();
+    if key.is_empty() || val.is_empty() {
+        return None;
+    }
+
+    Some((key.to_string(), clean_attribute_value(val)))
+}
+
+fn clean_attribute_value(value: &str) -> String {
+    let value = value.trim();
+    let value = value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .unwrap_or(value);
+    percent_decode(value)
 }
 
 /// Minimal percent-decoding for the characters GFF3 commonly encodes.
@@ -285,13 +345,17 @@ fn build_name_index(features: &[GffFeature]) -> HashMap<String, Vec<usize>> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
+    use flate2::{Compression, write::GzEncoder};
+
     use super::*;
 
     #[test]
     fn test_parse_basic_line() {
         let line =
             "chr1\tEnsembl\tgene\t11869\t14409\t.\t+\t.\tID=ENSG001;Name=DDX11L1;gene_name=DDX11L1";
-        let feat = parse_gff3_line(line).unwrap();
+        let feat = parse_feature_line(line).unwrap();
         assert_eq!(feat.seqname, "chr1");
         assert_eq!(feat.feature_type, "gene");
         assert_eq!(feat.start, 11868); // 0-based
@@ -304,21 +368,57 @@ mod tests {
     #[test]
     fn test_parse_parent() {
         let line = "chr1\t.\texon\t100\t200\t.\t-\t.\tParent=ENSG001;ID=exon1";
-        let feat = parse_gff3_line(line).unwrap();
+        let feat = parse_feature_line(line).unwrap();
         assert_eq!(feat.parent.as_deref(), Some("ENSG001"));
         assert_eq!(feat.strand, Some(Strand::Reverse));
     }
 
     #[test]
     fn test_skip_comment() {
-        assert!(parse_gff3_line("# comment").is_none());
-        assert!(parse_gff3_line("").is_none());
+        assert!(parse_feature_line("# comment").is_none());
+        assert!(parse_feature_line("").is_none());
     }
 
     #[test]
     fn test_percent_decode() {
         assert_eq!(percent_decode("hello%20world"), "hello world");
         assert_eq!(percent_decode("no%25encoding"), "no%encoding");
+    }
+
+    #[test]
+    fn test_parse_gtf_attributes() {
+        let line = "chr13\tRefSeq\texon\t16451446\t16451550\t.\t+\t.\tgene_id \"GENE1\"; transcript_id \"TX1\"; gene_name \"TPTE2\";";
+        let feat = parse_feature_line(line).unwrap();
+
+        assert_eq!(feat.seqname, "chr13");
+        assert_eq!(feat.feature_type, "exon");
+        assert_eq!(feat.start, 16_451_445);
+        assert_eq!(feat.end, 16_451_550);
+        assert_eq!(feat.id.as_deref(), Some("TX1"));
+        assert_eq!(feat.parent.as_deref(), Some("GENE1"));
+        assert_eq!(feat.name.as_deref(), Some("TPTE2"));
+        assert_eq!(feat.gene_name.as_deref(), Some("TPTE2"));
+    }
+
+    #[test]
+    fn test_load_gzipped_gtf() {
+        let path =
+            std::env::temp_dir().join(format!("locus-gff-test-{}.gtf.gz", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        let mut encoder = GzEncoder::new(file, Compression::default());
+        writeln!(
+            encoder,
+            "chr13\tRefSeq\tgene\t16451446\t18451446\t.\t+\t.\tgene_id \"GENE1\"; gene_name \"TPTE2\";"
+        )
+        .unwrap();
+        encoder.finish().unwrap();
+
+        let store = GffStore::load(&path).unwrap();
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(store.features.len(), 1);
+        assert_eq!(store.features[0].display_name(), "TPTE2");
+        assert_eq!(store.search("tpte2").len(), 1);
     }
 
     #[test]

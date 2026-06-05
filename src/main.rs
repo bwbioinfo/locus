@@ -39,7 +39,7 @@ fn main() -> Result<()> {
     };
 
     let gff = if let Some(ref path) = args.gff {
-        Some(GffStore::load(path).with_context(|| format!("loading GFF {path}"))?)
+        Some(GffStore::load(path).with_context(|| format!("loading annotation {path}"))?)
     } else {
         None
     };

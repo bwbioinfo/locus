@@ -23,9 +23,13 @@ locus sample.bam --region "chr1:1,000,000-1,001,000"
 
 # With a reference (reserved for future mismatch highlighting)
 locus sample.bam --reference hg38.fa
+
+# With annotations for feature rendering and gene search
+locus sample.bam --gff hg38.ncbiRefSeq.gtf.gz
 ```
 
 The BAM must be coordinate-sorted and indexed (`.bai` file beside it).
+Annotation files can be GFF3 or GTF, plain text or gzip/BGZF-compressed.
 
 ## Keybindings
 
@@ -90,7 +94,8 @@ src/
 ├── cache.rs         RenderRead, RegionCache, pileup layout, coverage binning
 ├── region.rs        Region type, region string parser
 ├── events.rs        Keyboard event dispatch
-├── screenshot.rs    Text screenshot export
+├── gff.rs           GFF3/GTF feature loading, parsing, and search
+├── screenshot.rs    ANSI text and HTML screenshot export
 ├── ui.rs            ratatui frame drawing (top bar, overlays)
 ├── error.rs         LocusError enum
 └── render/
