@@ -128,7 +128,7 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     let transform = ViewTransform::new(app.view_start, app.view_end, area.width.saturating_sub(2));
 
     let ruler_h = 2u16;
-    let features_h: u16 = if app.gff.is_some() { 3 } else { 0 };
+    let features_h: u16 = if app.gff.is_some() { 4 } else { 0 };
     let coverage_h = 3u16.min(area.height / 5);
     let reads_h = area
         .height
@@ -396,6 +396,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from("  Feature colors:"),
         Line::from("    Green  gene   Yellow  mRNA/transcript   Cyan  exon   Blue  CDS"),
+        Line::from("    ─>─    intron/transcript backbone   █ exon   ▓ CDS   ▒ UTR"),
     ];
 
     frame.render_widget(

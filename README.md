@@ -83,6 +83,12 @@ CIGAR operations:
 - `~` — skip / intron (N)
 - `S` — soft clip
 
+Feature track:
+- `─>─` / `─<─` — transcript or gene backbone, including intronic span
+- `█` — exon
+- `▓` — CDS
+- `▒` — UTR
+
 ## Architecture
 
 ```

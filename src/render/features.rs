@@ -21,6 +21,23 @@ fn feature_color(ty: &str) -> Color {
     }
 }
 
+fn feature_glyph(ty: &str) -> char {
+    match ty {
+        "exon" => '█',
+        "CDS" | "start_codon" | "stop_codon" => '▓',
+        "UTR" | "five_prime_UTR" | "three_prime_UTR" => '▒',
+        "gene" | "pseudogene" | "mRNA" | "transcript" | "lnc_RNA" | "ncRNA" | "pre_miRNA" => '─',
+        _ => '·',
+    }
+}
+
+fn is_intron_backbone(ty: &str) -> bool {
+    matches!(
+        ty,
+        "gene" | "pseudogene" | "mRNA" | "transcript" | "lnc_RNA" | "ncRNA" | "pre_miRNA"
+    )
+}
+
 /// Priority order for stacking rows: genes at top, then transcripts, then sub-features.
 fn feature_priority(ty: &str) -> u8 {
     match ty {
@@ -96,19 +113,25 @@ fn render_feature(
     let style = Style::default().fg(color);
     let width = (x_end - x_start) as usize;
 
-    // Strand arrow char for the body
-    use crate::cache::Strand;
-    let body_ch = match feat.strand {
-        Some(Strand::Forward) => '>',
-        Some(Strand::Reverse) => '<',
-        None => '─',
-    };
+    let body_ch = feature_glyph(&feat.feature_type);
 
-    // Fill body
+    // Fill body. Transcript/gene spans act as intron/backbone lines; directional
+    // ticks make strand visible without making them look like exon blocks.
     for x in x_start..x_end {
+        let ch = if is_intron_backbone(&feat.feature_type) {
+            intron_backbone_char(feat, x - x_start)
+        } else {
+            body_ch
+        };
         if let Some(cell) = buf.cell_mut((x, y)) {
-            cell.set_char(body_ch).set_style(style);
+            cell.set_char(ch).set_style(style);
         }
+    }
+
+    // Overlay name label only on backbone spans. Exon/CDS blocks are usually
+    // repeated and short, so labels obscure the shape more than they help.
+    if !is_intron_backbone(&feat.feature_type) {
+        return;
     }
 
     // Overlay name label if there's enough room (>= 3 cols)
@@ -128,5 +151,33 @@ fn render_feature(
                 }
             }
         }
+    }
+}
+
+fn intron_backbone_char(feat: &GffFeature, offset: u16) -> char {
+    use crate::cache::Strand;
+
+    if offset % 6 != 3 {
+        return '─';
+    }
+
+    match feat.strand {
+        Some(Strand::Forward) => '>',
+        Some(Strand::Reverse) => '<',
+        None => '─',
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exons_and_backbones_use_distinct_glyphs() {
+        assert_eq!(feature_glyph("exon"), '█');
+        assert_eq!(feature_glyph("CDS"), '▓');
+        assert_eq!(feature_glyph("transcript"), '─');
+        assert!(is_intron_backbone("transcript"));
+        assert!(!is_intron_backbone("exon"));
     }
 }
