@@ -14,6 +14,13 @@ use super::ViewTransform;
 const BASE_RENDER_THRESHOLD: f64 = 5.0;
 const INSERTION_EXPAND_THRESHOLD: f64 = 1.0;
 
+#[derive(Debug, Clone, Copy)]
+struct InsertionEvent {
+    ref_pos: u64,
+    read_pos: usize,
+    len: u64,
+}
+
 pub struct ReadsTrack<'a> {
     pub reads: &'a [RenderRead],
     pub rows: &'a [PileupRow],
@@ -72,14 +79,10 @@ fn render_bases(
     expand_insertions: bool,
     buf: &mut Buffer,
 ) {
-    if expand_insertions && transform.bp_per_col() <= INSERTION_EXPAND_THRESHOLD {
-        render_bases_with_expanded_insertions(read, reference, y, area, transform, buf);
-        return;
-    }
-
     let mut read_pos: usize = 0;
     let mut ref_pos: u64 = read.start;
     let mut insertions = Vec::new();
+    let dim = read.is_secondary || read.is_supplementary;
 
     for &op in &read.cigar_ops {
         match op {
@@ -93,13 +96,7 @@ fn render_bases(
                 for _ in 0..n {
                     let base = read.sequence.get(read_pos).copied().unwrap_or(b'N');
                     let ref_base = reference.and_then(|reference| reference.base_at(ref_pos));
-                    let style = aligned_base_style(
-                        base,
-                        ref_base,
-                        is_mismatch_op,
-                        read.mapq,
-                        read.is_secondary || read.is_supplementary,
-                    );
+                    let style = aligned_base_style(base, ref_base, is_mismatch_op, read.mapq, dim);
                     draw_at_ref_pos(ref_pos, y, base as char, style, area, transform, buf);
                     read_pos += 1;
                     ref_pos += 1;
@@ -107,7 +104,11 @@ fn render_bases(
             }
 
             CigarOp::Insertion(n) => {
-                insertions.push(ref_pos);
+                insertions.push(InsertionEvent {
+                    ref_pos,
+                    read_pos,
+                    len: n,
+                });
                 read_pos += n as usize;
                 // insertion does not advance ref
             }
@@ -131,134 +132,22 @@ fn render_bases(
         }
     }
 
-    for ref_pos in insertions {
-        let style = insertion_style();
-        draw_at_ref_pos(ref_pos, y, '^', style, area, transform, buf);
-    }
-}
-
-/// Render base-level reads with inserted sequence expanded into extra screen columns.
-///
-/// The reference coordinate after an insertion is shifted to the right for this read row only.
-/// This keeps inserted bases visible while preserving the reference-anchored left boundary.
-fn render_bases_with_expanded_insertions(
-    read: &RenderRead,
-    reference: Option<&ReferenceSlice>,
-    y: u16,
-    area: Rect,
-    transform: &ViewTransform,
-    buf: &mut Buffer,
-) {
-    let mut read_pos: usize = 0;
-    let mut ref_pos: u64 = read.start;
-    let mut insertion_offset: u16 = 0;
-    let mut pending_right_boundary = false;
-    let dim = read.is_secondary || read.is_supplementary;
-
-    for &op in &read.cigar_ops {
-        match op {
-            CigarOp::SoftClip(n) => {
-                read_pos += n as usize;
-            }
-            CigarOp::Match(n) | CigarOp::Mismatch(n) => {
-                let is_mismatch_op = matches!(op, CigarOp::Mismatch(_));
-                for _ in 0..n {
-                    let base = read.sequence.get(read_pos).copied().unwrap_or(b'N');
-                    let ref_base = reference.and_then(|reference| reference.base_at(ref_pos));
-                    let mut style =
-                        aligned_base_style(base, ref_base, is_mismatch_op, read.mapq, dim);
-                    if pending_right_boundary {
-                        style = insertion_boundary_style(style);
-                        pending_right_boundary = false;
-                    }
-                    draw_at_ref_pos_with_offset(
-                        ref_pos,
-                        insertion_offset,
-                        y,
-                        base as char,
-                        style,
-                        area,
-                        transform,
-                        buf,
-                    );
-                    read_pos += 1;
-                    ref_pos += 1;
-                }
-            }
-            CigarOp::Insertion(n) => {
-                underline_left_insertion_boundary(
-                    ref_pos,
-                    insertion_offset,
-                    y,
-                    area,
-                    transform,
-                    buf,
-                );
-
-                for i in 0..n {
-                    let base = read
-                        .sequence
-                        .get(read_pos + i as usize)
-                        .copied()
-                        .unwrap_or(b'N');
-                    let style = insertion_base_style(base);
-                    draw_at_ref_pos_with_offset(
-                        ref_pos,
-                        insertion_offset.saturating_add(i as u16),
-                        y,
-                        base as char,
-                        style,
-                        area,
-                        transform,
-                        buf,
-                    );
-                }
-
-                read_pos += n as usize;
-                insertion_offset = insertion_offset.saturating_add(n as u16);
-                pending_right_boundary = true;
-            }
-            CigarOp::Deletion(n) => {
-                for _ in 0..n {
-                    let mut style = Style::default().fg(Color::White).bg(Color::DarkGray);
-                    if pending_right_boundary {
-                        style = insertion_boundary_style(style);
-                        pending_right_boundary = false;
-                    }
-                    draw_at_ref_pos_with_offset(
-                        ref_pos,
-                        insertion_offset,
-                        y,
-                        '-',
-                        style,
-                        area,
-                        transform,
-                        buf,
-                    );
-                    ref_pos += 1;
-                }
-            }
-            CigarOp::Skip(n) => {
-                for _ in 0..n {
-                    let mut style = Style::default().fg(Color::DarkGray);
-                    if pending_right_boundary {
-                        style = insertion_boundary_style(style);
-                        pending_right_boundary = false;
-                    }
-                    draw_at_ref_pos_with_offset(
-                        ref_pos,
-                        insertion_offset,
-                        y,
-                        '─',
-                        style,
-                        area,
-                        transform,
-                        buf,
-                    );
-                    ref_pos += 1;
-                }
-            }
+    let can_expand = expand_insertions && transform.bp_per_col() <= INSERTION_EXPAND_THRESHOLD;
+    for insertion in insertions {
+        if can_expand {
+            render_inserted_bases(read, insertion, y, area, transform, buf);
+        } else {
+            draw_at_ref_pos(
+                insertion.ref_pos,
+                y,
+                'I',
+                insertion_marker_style(),
+                area,
+                transform,
+                buf,
+            );
         }
+        emphasize_insertion_boundaries(insertion.ref_pos, y, area, transform, buf);
     }
 }
 
@@ -286,33 +175,34 @@ fn draw_at_ref_pos(
     }
 }
 
-#[inline]
-fn draw_at_ref_pos_with_offset(
-    ref_pos: u64,
-    col_offset: u16,
+fn render_inserted_bases(
+    read: &RenderRead,
+    insertion: InsertionEvent,
     y: u16,
-    ch: char,
-    style: Style,
     area: Rect,
     transform: &ViewTransform,
     buf: &mut Buffer,
 ) {
-    if ref_pos < transform.region_start || ref_pos >= transform.region_end {
-        return;
-    }
-    let span = (transform.region_end - transform.region_start) as f64;
-    let col = ((ref_pos - transform.region_start) as f64 / span * transform.cols as f64) as u16;
-    let x = area.x + col.saturating_add(col_offset);
-    if x < area.x + area.width {
-        if let Some(cell) = buf.cell_mut((x, y)) {
-            cell.set_char(ch).set_style(style);
-        }
+    for i in 0..insertion.len {
+        let base = read
+            .sequence
+            .get(insertion.read_pos + i as usize)
+            .copied()
+            .unwrap_or(b'N');
+        draw_at_ref_pos(
+            insertion.ref_pos + i,
+            y,
+            base as char,
+            insertion_base_style(base),
+            area,
+            transform,
+            buf,
+        );
     }
 }
 
-fn underline_left_insertion_boundary(
+fn emphasize_insertion_boundaries(
     ref_pos: u64,
-    insertion_offset: u16,
     y: u16,
     area: Rect,
     transform: &ViewTransform,
@@ -324,17 +214,18 @@ fn underline_left_insertion_boundary(
     if left_ref_pos < transform.region_start {
         return;
     }
-    if let Some(cell) =
-        cell_at_ref_pos_with_offset(left_ref_pos, insertion_offset, y, area, transform, buf)
-    {
+    if let Some(cell) = cell_at_ref_pos(left_ref_pos, y, area, transform, buf) {
+        let style = insertion_boundary_style(cell.style());
+        cell.set_style(style);
+    }
+    if let Some(cell) = cell_at_ref_pos(ref_pos, y, area, transform, buf) {
         let style = insertion_boundary_style(cell.style());
         cell.set_style(style);
     }
 }
 
-fn cell_at_ref_pos_with_offset<'a>(
+fn cell_at_ref_pos<'a>(
     ref_pos: u64,
-    col_offset: u16,
     y: u16,
     area: Rect,
     transform: &ViewTransform,
@@ -345,7 +236,7 @@ fn cell_at_ref_pos_with_offset<'a>(
     }
     let span = (transform.region_end - transform.region_start) as f64;
     let col = ((ref_pos - transform.region_start) as f64 / span * transform.cols as f64) as u16;
-    let x = area.x + col.saturating_add(col_offset);
+    let x = area.x + col;
     if x < area.x + area.width {
         buf.cell_mut((x, y))
     } else {
@@ -370,7 +261,13 @@ fn render_arrows(
     let x_end = (area.x + col_end).min(area.x + area.width);
 
     let mut ref_pos = read.start;
+    let mut insertions = Vec::new();
     for &op in &read.cigar_ops {
+        if matches!(op, CigarOp::Insertion(_)) {
+            insertions.push(ref_pos);
+            continue;
+        }
+
         let ref_len = op.ref_len();
         let op_end = ref_pos + ref_len.max(1);
         let (oc_start, oc_end) = transform.bp_range_to_cols(ref_pos, op_end);
@@ -388,6 +285,18 @@ fn render_arrows(
         if ref_len > 0 {
             ref_pos += ref_len;
         }
+    }
+
+    for insertion_ref_pos in insertions {
+        draw_at_ref_pos(
+            insertion_ref_pos,
+            y,
+            'I',
+            insertion_marker_style(),
+            area,
+            transform,
+            buf,
+        );
     }
 
     if read.cigar_ops.is_empty() && x_start < x_end {
@@ -408,7 +317,7 @@ fn arrow_op_style(op: &CigarOp, read: &RenderRead) -> (Style, char) {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             'X',
         ),
-        CigarOp::Insertion(_) => (Style::default().fg(Color::Magenta), '^'),
+        CigarOp::Insertion(_) => (insertion_marker_style(), 'I'),
         CigarOp::Deletion(_) => (Style::default().fg(Color::White).bg(Color::DarkGray), '-'),
         CigarOp::Skip(_) => (Style::default().fg(Color::DarkGray), '─'),
         CigarOp::SoftClip(_) => (Style::default().fg(Color::DarkGray), '.'),
@@ -417,10 +326,11 @@ fn arrow_op_style(op: &CigarOp, read: &RenderRead) -> (Style, char) {
 
 // ─── Style helpers ────────────────────────────────────────────────────────────
 
-fn insertion_style() -> Style {
+fn insertion_marker_style() -> Style {
     Style::default()
-        .fg(Color::Magenta)
-        .add_modifier(Modifier::BOLD)
+        .fg(Color::Black)
+        .bg(Color::Magenta)
+        .add_modifier(Modifier::BOLD | Modifier::REVERSED | Modifier::UNDERLINED)
 }
 
 fn insertion_base_style(base: u8) -> Style {
@@ -537,15 +447,15 @@ mod tests {
     }
 
     #[test]
-    fn expanded_insertions_render_sequence_between_underlined_boundaries() {
+    fn expanded_insertions_overlay_sequence_without_shifting_downstream_bases() {
         let read = RenderRead {
             name: "read-with-ins".to_string(),
             start: 10,
-            end: 13,
+            end: 14,
             strand: Strand::Forward,
             mapq: 60,
-            cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(2), CigarOp::Match(1)],
-            sequence: b"ACGGG".to_vec(),
+            cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(1), CigarOp::Match(2)],
+            sequence: b"ACGTA".to_vec(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -559,8 +469,8 @@ mod tests {
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
         assert_eq!(buf[(2, 0)].symbol(), "G");
-        assert_eq!(buf[(3, 0)].symbol(), "G");
-        assert_eq!(buf[(4, 0)].symbol(), "G");
+        assert_eq!(buf[(3, 0)].symbol(), "A");
+        assert_eq!(buf[(4, 0)].symbol(), " ");
         assert!(
             buf[(1, 0)]
                 .style()
@@ -568,7 +478,7 @@ mod tests {
                 .contains(Modifier::BOLD | Modifier::UNDERLINED)
         );
         assert!(
-            buf[(4, 0)]
+            buf[(2, 0)]
                 .style()
                 .add_modifier
                 .contains(Modifier::BOLD | Modifier::UNDERLINED)
@@ -595,11 +505,12 @@ mod tests {
 
         render_bases(&read, None, 0, area, &transform, false, &mut buf);
 
-        assert_eq!(buf[(0, 0)].symbol(), "^");
+        assert_eq!(buf[(0, 0)].symbol(), "I");
+        assert_eq!(buf[(0, 0)].style().bg, Some(Color::Magenta));
     }
 
     #[test]
-    fn expanded_insertions_keep_later_boundary_offsets() {
+    fn expanded_insertions_do_not_apply_offsets_after_multiple_insertions() {
         let read = RenderRead {
             name: "read-with-two-ins".to_string(),
             start: 10,
@@ -627,17 +538,17 @@ mod tests {
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
         assert_eq!(buf[(2, 0)].symbol(), "G");
-        assert_eq!(buf[(3, 0)].symbol(), "T");
-        assert_eq!(buf[(4, 0)].symbol(), "G");
-        assert_eq!(buf[(5, 0)].symbol(), "A");
+        assert_eq!(buf[(3, 0)].symbol(), "G");
+        assert_eq!(buf[(4, 0)].symbol(), " ");
+        assert_eq!(buf[(5, 0)].symbol(), " ");
         assert!(
-            buf[(3, 0)]
+            buf[(2, 0)]
                 .style()
                 .add_modifier
                 .contains(Modifier::BOLD | Modifier::UNDERLINED)
         );
         assert!(
-            buf[(5, 0)]
+            buf[(3, 0)]
                 .style()
                 .add_modifier
                 .contains(Modifier::BOLD | Modifier::UNDERLINED)
@@ -666,7 +577,8 @@ mod tests {
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
-        assert_eq!(buf[(2, 0)].symbol(), "^");
+        assert_eq!(buf[(2, 0)].symbol(), "I");
+        assert_eq!(buf[(2, 0)].style().bg, Some(Color::Magenta));
         assert_ne!(buf[(3, 0)].symbol(), "G");
     }
 }

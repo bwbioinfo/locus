@@ -421,7 +421,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
             "    Reference mismatches use base-colored bold backgrounds when --reference is loaded",
         ),
         Line::from(""),
-        Line::from("  CIGAR:  > / <  match   base highlight  mismatch   ^  ins   -  del   ~  skip"),
+        Line::from("  CIGAR:  > / <  match   base highlight  mismatch   I  ins   -  del   ~  skip"),
         Line::from(""),
         Line::from("  Feature colors:"),
         Line::from("    Green  gene   Yellow  mRNA/transcript   Cyan  exon   Blue  CDS"),
