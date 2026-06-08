@@ -133,7 +133,10 @@ fn format_region_display(app: &App) -> String {
 }
 
 fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
-    let transform = ViewTransform::new(app.view_start, app.view_end, area.width.saturating_sub(2));
+    let base_transform =
+        ViewTransform::new(app.view_start, app.view_end, area.width.saturating_sub(2));
+    let insertion_gap = app.selected_insertion_gap(&base_transform);
+    let transform = base_transform.with_insertion_gap(insertion_gap);
 
     let ruler_h = 2u16;
     let reference_h: u16 = if app.reference.is_some() { 1 } else { 0 };
@@ -234,9 +237,9 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
     let keys = match app.mode {
         Mode::Normal => {
             if app.gff.is_some() {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
             } else {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
             }
         }
         Mode::GoTo => " Enter:confirm  Esc:cancel",
@@ -400,6 +403,8 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("  ↑ / + / =  Zoom in"),
         Line::from("  ↓ / -      Zoom out"),
         Line::from("  i          Toggle expanded insertion sequence"),
+        Line::from("  Tab        Move to next expanded insertion"),
+        Line::from("  Shift+Tab  Move to previous expanded insertion"),
         Line::from("  g          Go to region  (e.g. chr1:1000-2000)"),
         Line::from("  f          Find feature / gene by name  (requires --gff)"),
         Line::from("  n / N      Cycle to next / previous feature match"),

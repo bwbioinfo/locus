@@ -8,7 +8,7 @@ use ratatui::{
 use crate::cache::{CigarOp, PileupRow, RenderRead, Strand};
 use crate::reference::ReferenceSlice;
 
-use super::ViewTransform;
+use super::{InsertionGap, ViewTransform};
 
 /// Show individual bases when the view is this many bp per column or narrower.
 const BASE_RENDER_THRESHOLD: f64 = 5.0;
@@ -65,6 +65,57 @@ impl<'a> Widget for ReadsTrack<'a> {
             }
         }
     }
+}
+
+pub fn selected_insertion_gap(
+    reads: &[RenderRead],
+    rows: &[PileupRow],
+    transform: &ViewTransform,
+) -> Option<InsertionGap> {
+    if transform.bp_per_col() > INSERTION_EXPAND_THRESHOLD {
+        return None;
+    }
+
+    let gaps = visible_insertion_gaps(reads, rows, transform);
+    let center = transform.region_start + (transform.region_end - transform.region_start) / 2;
+    gaps.into_iter()
+        .min_by_key(|gap| (gap.ref_pos.abs_diff(center), std::cmp::Reverse(gap.len)))
+}
+
+pub fn visible_insertion_gaps(
+    reads: &[RenderRead],
+    rows: &[PileupRow],
+    transform: &ViewTransform,
+) -> Vec<InsertionGap> {
+    if transform.bp_per_col() > INSERTION_EXPAND_THRESHOLD {
+        return Vec::new();
+    }
+
+    let mut gaps: Vec<InsertionGap> = Vec::new();
+    for row in rows {
+        for &read_idx in row {
+            let Some(read) = reads.get(read_idx) else {
+                continue;
+            };
+            for insertion in insertion_events(read) {
+                if insertion.ref_pos < transform.region_start
+                    || insertion.ref_pos >= transform.region_end
+                {
+                    continue;
+                }
+                match gaps.iter_mut().find(|gap| gap.ref_pos == insertion.ref_pos) {
+                    Some(gap) => gap.len = gap.len.max(insertion.len),
+                    None => gaps.push(InsertionGap {
+                        ref_pos: insertion.ref_pos,
+                        len: insertion.len,
+                    }),
+                }
+            }
+        }
+    }
+
+    gaps.sort_by_key(|gap| gap.ref_pos);
+    gaps
 }
 
 // ─── Base-level rendering (zoomed in) ────────────────────────────────────────
@@ -132,9 +183,11 @@ fn render_bases(
         }
     }
 
-    let can_expand = expand_insertions && transform.bp_per_col() <= INSERTION_EXPAND_THRESHOLD;
+    let selected_gap = expand_insertions
+        .then_some(transform.insertion_gap)
+        .flatten();
     for insertion in insertions {
-        if can_expand {
+        if selected_gap.is_some_and(|gap| gap.ref_pos == insertion.ref_pos) {
             render_inserted_bases(read, insertion, y, area, transform, buf);
         } else {
             draw_at_ref_pos(
@@ -149,6 +202,13 @@ fn render_bases(
         }
         emphasize_insertion_boundaries(insertion.ref_pos, y, area, transform, buf);
     }
+
+    if let Some(gap) = selected_gap {
+        if read.start < gap.ref_pos && read.end > gap.ref_pos {
+            draw_insertion_box(gap.ref_pos, y, area, transform, buf);
+            emphasize_insertion_boundaries(gap.ref_pos, y, area, transform, buf);
+        }
+    }
 }
 
 /// Draw a single character at a reference position, translated to screen coordinates.
@@ -162,11 +222,9 @@ fn draw_at_ref_pos(
     transform: &ViewTransform,
     buf: &mut Buffer,
 ) {
-    if ref_pos < transform.region_start || ref_pos >= transform.region_end {
+    let Some(col) = transform.bp_to_col(ref_pos) else {
         return;
-    }
-    let span = (transform.region_end - transform.region_start) as f64;
-    let col = ((ref_pos - transform.region_start) as f64 / span * transform.cols as f64) as u16;
+    };
     let x = area.x + col;
     if x < area.x + area.width {
         if let Some(cell) = buf.cell_mut((x, y)) {
@@ -189,15 +247,42 @@ fn render_inserted_bases(
             .get(insertion.read_pos + i as usize)
             .copied()
             .unwrap_or(b'N');
-        draw_at_ref_pos(
-            insertion.ref_pos + i,
-            y,
-            base as char,
-            insertion_base_style(base),
-            area,
-            transform,
-            buf,
-        );
+        let Some(col) = transform.insertion_col(insertion.ref_pos, i) else {
+            continue;
+        };
+        let x = area.x + col;
+        if x < area.x + area.width {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(base as char)
+                    .set_style(insertion_base_style(base));
+            }
+        }
+    }
+}
+
+fn draw_insertion_box(
+    insertion_ref_pos: u64,
+    y: u16,
+    area: Rect,
+    transform: &ViewTransform,
+    buf: &mut Buffer,
+) {
+    let Some((left_col, right_col)) = transform.insertion_border_cols(insertion_ref_pos) else {
+        return;
+    };
+    let style = insertion_box_style();
+    let left_x = area.x + left_col;
+    let right_x = area.x + right_col;
+
+    if left_x < area.x + area.width {
+        if let Some(cell) = buf.cell_mut((left_x, y)) {
+            cell.set_char('[').set_style(style);
+        }
+    }
+    if right_x < area.x + area.width {
+        if let Some(cell) = buf.cell_mut((right_x, y)) {
+            cell.set_char(']').set_style(style);
+        }
     }
 }
 
@@ -231,17 +316,40 @@ fn cell_at_ref_pos<'a>(
     transform: &ViewTransform,
     buf: &'a mut Buffer,
 ) -> Option<&'a mut ratatui::buffer::Cell> {
-    if ref_pos < transform.region_start || ref_pos >= transform.region_end {
-        return None;
-    }
-    let span = (transform.region_end - transform.region_start) as f64;
-    let col = ((ref_pos - transform.region_start) as f64 / span * transform.cols as f64) as u16;
+    let col = transform.bp_to_col(ref_pos)?;
     let x = area.x + col;
     if x < area.x + area.width {
         buf.cell_mut((x, y))
     } else {
         None
     }
+}
+
+fn insertion_events(read: &RenderRead) -> Vec<InsertionEvent> {
+    let mut read_pos: usize = 0;
+    let mut ref_pos: u64 = read.start;
+    let mut insertions = Vec::new();
+
+    for &op in &read.cigar_ops {
+        match op {
+            CigarOp::SoftClip(n) => read_pos += n as usize,
+            CigarOp::Match(n) | CigarOp::Mismatch(n) => {
+                read_pos += n as usize;
+                ref_pos += n;
+            }
+            CigarOp::Insertion(n) => {
+                insertions.push(InsertionEvent {
+                    ref_pos,
+                    read_pos,
+                    len: n,
+                });
+                read_pos += n as usize;
+            }
+            CigarOp::Deletion(n) | CigarOp::Skip(n) => ref_pos += n,
+        }
+    }
+
+    insertions
 }
 
 // ─── Arrow rendering (zoomed out) ────────────────────────────────────────────
@@ -336,7 +444,13 @@ fn insertion_marker_style() -> Style {
 fn insertion_base_style(base: u8) -> Style {
     Style::default()
         .fg(base_color(base))
-        .bg(Color::DarkGray)
+        .bg(Color::Reset)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn insertion_box_style() -> Style {
+    Style::default()
+        .fg(Color::Magenta)
         .add_modifier(Modifier::BOLD)
 }
 
@@ -447,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn expanded_insertions_overlay_sequence_without_shifting_downstream_bases() {
+    fn expanded_insertions_open_shared_gap_at_selected_locus() {
         let read = RenderRead {
             name: "read-with-ins".to_string(),
             start: 10,
@@ -461,16 +575,21 @@ mod tests {
             is_duplicate: false,
         };
         let area = Rect::new(0, 0, 8, 1);
-        let transform = ViewTransform::new(10, 18, 8);
+        let transform = ViewTransform::new(10, 18, 8).with_insertion_gap(Some(InsertionGap {
+            ref_pos: 12,
+            len: 1,
+        }));
         let mut buf = Buffer::empty(area);
 
         render_bases(&read, None, 0, area, &transform, true, &mut buf);
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
-        assert_eq!(buf[(2, 0)].symbol(), "G");
-        assert_eq!(buf[(3, 0)].symbol(), "A");
-        assert_eq!(buf[(4, 0)].symbol(), " ");
+        assert_eq!(buf[(2, 0)].symbol(), "[");
+        assert_eq!(buf[(3, 0)].symbol(), "G");
+        assert_eq!(buf[(4, 0)].symbol(), "]");
+        assert_eq!(buf[(5, 0)].symbol(), "T");
+        assert_eq!(buf[(6, 0)].symbol(), "A");
         assert!(
             buf[(1, 0)]
                 .style()
@@ -478,7 +597,7 @@ mod tests {
                 .contains(Modifier::BOLD | Modifier::UNDERLINED)
         );
         assert!(
-            buf[(2, 0)]
+            buf[(5, 0)]
                 .style()
                 .add_modifier
                 .contains(Modifier::BOLD | Modifier::UNDERLINED)
@@ -510,7 +629,60 @@ mod tests {
     }
 
     #[test]
-    fn expanded_insertions_do_not_apply_offsets_after_multiple_insertions() {
+    fn visible_insertion_gaps_are_sorted_and_deduplicated() {
+        let read_a = RenderRead {
+            name: "read-a".to_string(),
+            start: 10,
+            end: 15,
+            strand: Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![CigarOp::Match(4), CigarOp::Insertion(1), CigarOp::Match(1)],
+            sequence: b"ACGTTA".to_vec(),
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        };
+        let read_b = RenderRead {
+            name: "read-b".to_string(),
+            start: 10,
+            end: 15,
+            strand: Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![
+                CigarOp::Match(2),
+                CigarOp::Insertion(2),
+                CigarOp::Match(2),
+                CigarOp::Insertion(3),
+                CigarOp::Match(1),
+            ],
+            sequence: b"ACGGTTAAAA".to_vec(),
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        };
+        let reads = vec![read_a, read_b];
+        let rows = vec![vec![0, 1]];
+        let transform = ViewTransform::new(10, 20, 10);
+
+        let gaps = visible_insertion_gaps(&reads, &rows, &transform);
+
+        assert_eq!(
+            gaps,
+            vec![
+                InsertionGap {
+                    ref_pos: 12,
+                    len: 2
+                },
+                InsertionGap {
+                    ref_pos: 14,
+                    len: 3
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn expanded_insertions_shift_by_selected_gap_only() {
         let read = RenderRead {
             name: "read-with-two-ins".to_string(),
             start: 10,
@@ -530,29 +702,67 @@ mod tests {
             is_duplicate: false,
         };
         let area = Rect::new(0, 0, 10, 1);
-        let transform = ViewTransform::new(10, 20, 10);
+        let transform = ViewTransform::new(10, 20, 10).with_insertion_gap(Some(InsertionGap {
+            ref_pos: 12,
+            len: 1,
+        }));
         let mut buf = Buffer::empty(area);
 
         render_bases(&read, None, 0, area, &transform, true, &mut buf);
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
-        assert_eq!(buf[(2, 0)].symbol(), "G");
+        assert_eq!(buf[(2, 0)].symbol(), "[");
         assert_eq!(buf[(3, 0)].symbol(), "G");
+        assert_eq!(buf[(4, 0)].symbol(), "]");
+        assert_eq!(buf[(5, 0)].symbol(), "T");
+        assert_eq!(buf[(6, 0)].symbol(), "I");
+        assert_eq!(buf[(7, 0)].symbol(), " ");
+        assert!(
+            buf[(5, 0)]
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED)
+        );
+        assert!(
+            buf[(6, 0)]
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED)
+        );
+    }
+
+    #[test]
+    fn shared_gap_shifts_reads_without_selected_insertion() {
+        let read = RenderRead {
+            name: "read-without-ins".to_string(),
+            start: 10,
+            end: 14,
+            strand: Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![CigarOp::Match(4)],
+            sequence: b"ACGT".to_vec(),
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        };
+        let area = Rect::new(0, 0, 8, 1);
+        let transform = ViewTransform::new(10, 18, 8).with_insertion_gap(Some(InsertionGap {
+            ref_pos: 12,
+            len: 2,
+        }));
+        let mut buf = Buffer::empty(area);
+
+        render_bases(&read, None, 0, area, &transform, true, &mut buf);
+
+        assert_eq!(buf[(0, 0)].symbol(), "A");
+        assert_eq!(buf[(1, 0)].symbol(), "C");
+        assert_eq!(buf[(2, 0)].symbol(), "[");
+        assert_eq!(buf[(3, 0)].symbol(), " ");
         assert_eq!(buf[(4, 0)].symbol(), " ");
-        assert_eq!(buf[(5, 0)].symbol(), " ");
-        assert!(
-            buf[(2, 0)]
-                .style()
-                .add_modifier
-                .contains(Modifier::BOLD | Modifier::UNDERLINED)
-        );
-        assert!(
-            buf[(3, 0)]
-                .style()
-                .add_modifier
-                .contains(Modifier::BOLD | Modifier::UNDERLINED)
-        );
+        assert_eq!(buf[(5, 0)].symbol(), "]");
+        assert_eq!(buf[(6, 0)].symbol(), "G");
+        assert_eq!(buf[(7, 0)].symbol(), "T");
     }
 
     #[test]

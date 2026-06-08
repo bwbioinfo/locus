@@ -6,6 +6,10 @@ use crate::{
     gff::GffStore,
     reference::ReferenceStore,
     region::{Region, parse_region},
+    render::{
+        InsertionGap, ViewTransform,
+        reads::{selected_insertion_gap, visible_insertion_gaps},
+    },
     screenshot,
 };
 
@@ -50,6 +54,7 @@ pub struct App {
     pub terminal_cols: u16,
     pub terminal_rows: u16,
     pub expand_insertions: bool,
+    pub selected_insertion_ref_pos: Option<u64>,
 
     /// Set to true to request a clean exit
     pub should_quit: bool,
@@ -108,6 +113,7 @@ impl App {
             terminal_cols: 80,
             terminal_rows: 24,
             expand_insertions: false,
+            selected_insertion_ref_pos: None,
             should_quit: false,
             needs_fetch: true,
             feature_matches: Vec::new(),
@@ -150,11 +156,72 @@ impl App {
 
     pub fn toggle_insertions(&mut self) {
         self.expand_insertions = !self.expand_insertions;
+        if !self.expand_insertions {
+            self.selected_insertion_ref_pos = None;
+        }
         self.status_msg = Some(if self.expand_insertions {
             "insertions expanded".to_string()
         } else {
             "insertions collapsed".to_string()
         });
+    }
+
+    pub fn cycle_insertion_expansion(&mut self, forward: bool) {
+        if !self.expand_insertions {
+            self.expand_insertions = true;
+        }
+
+        let transform = self.base_view_transform();
+        let gaps = visible_insertion_gaps(&self.cache.reads, &self.cache.pileup_rows, &transform);
+        if gaps.is_empty() {
+            self.selected_insertion_ref_pos = None;
+            self.status_msg = Some("no visible insertions to expand".to_string());
+            return;
+        }
+
+        let current_idx = self
+            .selected_insertion_ref_pos
+            .and_then(|pos| gaps.iter().position(|gap| gap.ref_pos == pos));
+        let next_idx = match (current_idx, forward) {
+            (Some(idx), true) => (idx + 1) % gaps.len(),
+            (Some(0), false) => gaps.len() - 1,
+            (Some(idx), false) => idx - 1,
+            (None, true) => 0,
+            (None, false) => gaps.len() - 1,
+        };
+        let gap = gaps[next_idx];
+        self.selected_insertion_ref_pos = Some(gap.ref_pos);
+        self.status_msg = Some(format!(
+            "expanded insertion {} bp at {}:{}",
+            gap.len,
+            self.current_contig(),
+            gap.ref_pos + 1
+        ));
+    }
+
+    pub fn selected_insertion_gap(&self, transform: &ViewTransform) -> Option<InsertionGap> {
+        if !self.expand_insertions {
+            return None;
+        }
+        let gaps = visible_insertion_gaps(&self.cache.reads, &self.cache.pileup_rows, transform);
+        if let Some(selected_ref_pos) = self.selected_insertion_ref_pos {
+            if let Some(gap) = gaps
+                .iter()
+                .copied()
+                .find(|gap| gap.ref_pos == selected_ref_pos)
+            {
+                return Some(gap);
+            }
+        }
+        selected_insertion_gap(&self.cache.reads, &self.cache.pileup_rows, transform)
+    }
+
+    fn base_view_transform(&self) -> ViewTransform {
+        ViewTransform::new(
+            self.view_start,
+            self.view_end,
+            self.terminal_cols.saturating_sub(2),
+        )
     }
 
     // ─── Navigation ───────────────────────────────────────────────────────────
