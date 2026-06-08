@@ -49,6 +49,7 @@ pub struct App {
     pub status_msg: Option<String>,
     pub terminal_cols: u16,
     pub terminal_rows: u16,
+    pub expand_insertions: bool,
 
     /// Set to true to request a clean exit
     pub should_quit: bool,
@@ -106,6 +107,7 @@ impl App {
             status_msg: None,
             terminal_cols: 80,
             terminal_rows: 24,
+            expand_insertions: false,
             should_quit: false,
             needs_fetch: true,
             feature_matches: Vec::new(),
@@ -144,6 +146,15 @@ impl App {
 
     pub fn view_cols(&self) -> usize {
         self.terminal_cols.saturating_sub(2) as usize
+    }
+
+    pub fn toggle_insertions(&mut self) {
+        self.expand_insertions = !self.expand_insertions;
+        self.status_msg = Some(if self.expand_insertions {
+            "insertions expanded".to_string()
+        } else {
+            "insertions collapsed".to_string()
+        });
     }
 
     // ─── Navigation ───────────────────────────────────────────────────────────

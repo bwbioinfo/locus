@@ -60,7 +60,15 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         app.current_contig(),
         format_region_display(app),
     );
-    let metrics = format!(" scale:{:.1} bp/col  reads:{} ", bp_per_col, read_count);
+    let insertion_mode = if app.expand_insertions {
+        "ins:expanded"
+    } else {
+        "ins:collapsed"
+    };
+    let metrics = format!(
+        " scale:{:.1} bp/col  reads:{}  {} ",
+        bp_per_col, read_count, insertion_mode
+    );
     let mut status = app.status_msg.as_ref().map(|msg| format!(" status:{msg} "));
 
     let status_width = status.as_ref().map_or(0, |s| s.len());
@@ -201,6 +209,7 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
             reference: app.cache.reference.as_ref(),
             transform,
             show_names,
+            expand_insertions: app.expand_insertions,
         },
         chunks[chunk_idx],
     );
@@ -225,9 +234,9 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
     let keys = match app.mode {
         Mode::Normal => {
             if app.gff.is_some() {
-                " q:quit  ←/→:pan  +/-:zoom  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
             } else {
-                " q:quit  ←/→:pan  +/-:zoom  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
             }
         }
         Mode::GoTo => " Enter:confirm  Esc:cancel",
@@ -390,6 +399,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("  L          Pan right (large)"),
         Line::from("  ↑ / + / =  Zoom in"),
         Line::from("  ↓ / -      Zoom out"),
+        Line::from("  i          Toggle expanded insertion sequence"),
         Line::from("  g          Go to region  (e.g. chr1:1000-2000)"),
         Line::from("  f          Find feature / gene by name  (requires --gff)"),
         Line::from("  n / N      Cycle to next / previous feature match"),
@@ -411,7 +421,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
             "    Reference mismatches use base-colored bold backgrounds when --reference is loaded",
         ),
         Line::from(""),
-        Line::from("  CIGAR:  > / <  match   base highlight  mismatch   I  ins   -  del   ~  skip"),
+        Line::from("  CIGAR:  > / <  match   base highlight  mismatch   ^  ins   -  del   ~  skip"),
         Line::from(""),
         Line::from("  Feature colors:"),
         Line::from("    Green  gene   Yellow  mRNA/transcript   Cyan  exon   Blue  CDS"),
