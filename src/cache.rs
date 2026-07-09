@@ -30,6 +30,27 @@ impl CigarOp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModificationStrand {
+    Forward,
+    Reverse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModifiedBaseCall {
+    pub read_pos: usize,
+    pub canonical_base: u8,
+    pub strand: ModificationStrand,
+    pub modification: String,
+    pub probability: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlignedModifiedBaseCall {
+    pub call: ModifiedBaseCall,
+    pub ref_pos: Option<u64>,
+}
+
 /// Lightweight read representation for rendering.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -44,6 +65,7 @@ pub struct RenderRead {
     pub cigar_ops: Vec<CigarOp>,
     /// ASCII-decoded read sequence (A/C/G/T/N), read-coordinate indexed.
     pub sequence: Vec<u8>,
+    pub methylation: Vec<ModifiedBaseCall>,
     pub is_secondary: bool,
     pub is_supplementary: bool,
     pub is_duplicate: bool,
@@ -53,6 +75,47 @@ impl RenderRead {
     #[allow(dead_code)]
     pub fn len_bp(&self) -> u64 {
         self.end.saturating_sub(self.start)
+    }
+
+    pub fn aligned_methylation(&self) -> Vec<AlignedModifiedBaseCall> {
+        let mut aligned = self
+            .methylation
+            .iter()
+            .cloned()
+            .map(|call| AlignedModifiedBaseCall {
+                call,
+                ref_pos: None,
+            })
+            .collect::<Vec<_>>();
+
+        let mut read_pos: usize = 0;
+        let mut ref_pos = self.start;
+
+        for &op in &self.cigar_ops {
+            match op {
+                CigarOp::SoftClip(n) | CigarOp::Insertion(n) => {
+                    read_pos += n as usize;
+                }
+                CigarOp::Match(n) | CigarOp::Mismatch(n) => {
+                    let start_read_pos = read_pos;
+                    let end_read_pos = read_pos + n as usize;
+                    for aligned_call in &mut aligned {
+                        if (start_read_pos..end_read_pos).contains(&aligned_call.call.read_pos) {
+                            aligned_call.ref_pos = Some(
+                                ref_pos + (aligned_call.call.read_pos - start_read_pos) as u64,
+                            );
+                        }
+                    }
+                    read_pos = end_read_pos;
+                    ref_pos += n;
+                }
+                CigarOp::Deletion(n) | CigarOp::Skip(n) => {
+                    ref_pos += n;
+                }
+            }
+        }
+
+        aligned
     }
 }
 
@@ -189,6 +252,7 @@ mod tests {
             mapq: 60,
             cigar_ops: vec![CigarOp::Match(end - start)],
             sequence: vec![b'A'; len],
+            methylation: Vec::new(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -236,5 +300,57 @@ mod tests {
         let reads = vec![make_read("r1", 0, 100), make_read("r2", 0, 100)];
         let bins = bin_coverage(&reads, &visible, 10);
         assert!(bins.iter().all(|&c| c == 2));
+    }
+
+    fn methylated_call(read_pos: usize) -> ModifiedBaseCall {
+        ModifiedBaseCall {
+            read_pos,
+            canonical_base: b'C',
+            strand: ModificationStrand::Forward,
+            modification: "m".to_string(),
+            probability: Some(200),
+        }
+    }
+
+    #[test]
+    fn aligned_methylation_maps_match_positions() {
+        let mut read = make_read("r", 100, 105);
+        read.sequence = b"ACGTC".to_vec();
+        read.methylation = vec![methylated_call(1), methylated_call(4)];
+
+        let aligned = read.aligned_methylation();
+
+        assert_eq!(aligned[0].ref_pos, Some(101));
+        assert_eq!(aligned[1].ref_pos, Some(104));
+    }
+
+    #[test]
+    fn aligned_methylation_respects_indels_skips_and_soft_clips() {
+        let mut read = make_read("r", 100, 108);
+        read.cigar_ops = vec![
+            CigarOp::SoftClip(1),
+            CigarOp::Match(2),
+            CigarOp::Insertion(1),
+            CigarOp::Match(2),
+            CigarOp::Deletion(2),
+            CigarOp::Skip(1),
+            CigarOp::Match(1),
+        ];
+        read.sequence = b"SACGTA".to_vec();
+        read.methylation = vec![
+            methylated_call(0),
+            methylated_call(2),
+            methylated_call(3),
+            methylated_call(4),
+            methylated_call(5),
+        ];
+
+        let aligned = read.aligned_methylation();
+        let ref_positions = aligned.iter().map(|call| call.ref_pos).collect::<Vec<_>>();
+
+        assert_eq!(
+            ref_positions,
+            vec![None, Some(101), None, Some(102), Some(103)]
+        );
     }
 }

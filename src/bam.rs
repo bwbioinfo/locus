@@ -8,10 +8,14 @@ use anyhow::{Context, Result};
 use noodles_bam as bam;
 use noodles_bgzf as bgzf;
 use noodles_core::Position;
-use noodles_sam as sam;
+use noodles_sam::{
+    self as sam,
+    alignment::record::data::field::{Tag, Value, value::Array},
+};
 
 use crate::cache::RenderRead;
 use crate::error::LocusError;
+use crate::methylation::parse_modified_bases;
 use crate::region::Region;
 
 pub struct ContigInfo {
@@ -180,6 +184,7 @@ fn record_to_render(record: &bam::Record) -> Option<RenderRead> {
 
     // Decode 4-bit packed sequence. as_ref() gives the raw encoded bytes.
     let sequence = decode_sequence(record.sequence().as_ref(), read_len);
+    let methylation = parse_record_methylation(record, &sequence);
 
     let end_0based = start_0based + ref_span;
     let name = record
@@ -201,8 +206,35 @@ fn record_to_render(record: &bam::Record) -> Option<RenderRead> {
         mapq,
         cigar_ops,
         sequence,
+        methylation,
         is_secondary: flags.is_secondary(),
         is_supplementary: flags.is_supplementary(),
         is_duplicate: flags.is_duplicate(),
     })
+}
+
+fn parse_record_methylation(
+    record: &bam::Record,
+    sequence: &[u8],
+) -> Vec<crate::cache::ModifiedBaseCall> {
+    let data = record.data();
+    let mm = match data.get(&Tag::new(b'M', b'M')).and_then(Result::ok) {
+        Some(Value::String(value)) => value,
+        _ => return Vec::new(),
+    };
+    let Ok(mm) = std::str::from_utf8(mm.as_ref()) else {
+        return Vec::new();
+    };
+
+    let ml = data
+        .get(&Tag::new(b'M', b'L'))
+        .and_then(Result::ok)
+        .and_then(|value| match value {
+            Value::Array(Array::UInt8(values)) => {
+                Some(values.iter().filter_map(Result::ok).collect::<Vec<_>>())
+            }
+            _ => None,
+        });
+
+    parse_modified_bases(mm, ml.as_deref(), sequence)
 }
