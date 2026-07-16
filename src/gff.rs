@@ -2,11 +2,12 @@ use std::{
     collections::HashMap,
     fs::File,
     io::{self, BufRead, BufReader, Read},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 use flate2::read::MultiGzDecoder;
+use noodles_tabix as tabix;
 
 use crate::cache::Strand;
 use crate::region::Region;
@@ -53,6 +54,7 @@ pub struct GffStore {
     pub features: Vec<GffFeature>,
     /// lowercase-name → feature indices for fast search
     name_index: HashMap<String, Vec<usize>>,
+    indexed_path: Option<PathBuf>,
 }
 
 impl GffStore {
@@ -84,9 +86,13 @@ impl GffStore {
         }
 
         let name_index = build_name_index(&features);
+        let indexed_path = associated_tabix_index_path(path)
+            .filter(|index_path| is_gzip_like(path) && index_path.exists())
+            .map(|_| path.to_path_buf());
         Ok(Self {
             features,
             name_index,
+            indexed_path,
         })
     }
 
@@ -132,15 +138,27 @@ impl GffStore {
     }
 
     /// Return features overlapping [start, end) on the given contig.
-    pub fn features_in_region<'a>(
-        &'a self,
-        contig: &str,
-        start: u64,
-        end: u64,
-    ) -> impl Iterator<Item = &'a GffFeature> {
+    pub fn features_in_region(&self, contig: &str, start: u64, end: u64) -> Vec<GffFeature> {
+        if let Some(path) = self.indexed_path.as_deref() {
+            if let Ok(features) = query_indexed_features(path, contig, start, end) {
+                return features;
+            }
+        }
+
+        self.features_in_region_linear(contig, start, end)
+    }
+
+    fn features_in_region_linear(&self, contig: &str, start: u64, end: u64) -> Vec<GffFeature> {
         self.features
             .iter()
-            .filter(move |f| f.seqname == contig && f.start < end && f.end > start)
+            .filter(|f| f.seqname == contig && f.start < end && f.end > start)
+            .cloned()
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn has_tabix_index(&self) -> bool {
+        self.indexed_path.is_some()
     }
 }
 
@@ -162,6 +180,47 @@ fn is_gzip_like(path: &Path) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "gz" | "bgz" | "bgzip"))
         .unwrap_or(false)
+}
+
+fn associated_tabix_index_path(path: &Path) -> Option<PathBuf> {
+    let mut indexed = PathBuf::from(path);
+    let file_name = indexed.file_name()?.to_str()?;
+    indexed.set_file_name(format!("{file_name}.tbi"));
+    Some(indexed)
+}
+
+fn query_indexed_features(
+    path: &Path,
+    contig: &str,
+    start: u64,
+    end: u64,
+) -> io::Result<Vec<GffFeature>> {
+    let region = tabix_region(contig, start, end)?;
+    let mut reader = tabix::io::indexed_reader::Builder::default().build_from_path(path)?;
+    let query = match reader.query(&region) {
+        Ok(query) => query,
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+
+    let mut features = Vec::new();
+    for result in query {
+        let record = result?;
+        let line = record.as_ref();
+        if let Some(feature) = parse_feature_line(line) {
+            features.push(feature);
+        }
+    }
+
+    Ok(features)
+}
+
+fn tabix_region(contig: &str, start: u64, end: u64) -> io::Result<noodles_core_018::Region> {
+    let start = start.saturating_add(1);
+    let end = end.max(start);
+    format!("{contig}:{start}-{end}")
+        .parse()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }
 
 fn parse_feature_line(line: &str) -> Option<GffFeature> {
@@ -345,9 +404,12 @@ fn build_name_index(features: &[GffFeature]) -> HashMap<String, Vec<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::io::{self, Write};
 
     use flate2::{Compression, write::GzEncoder};
+    use noodles_bgzf_044 as bgzf044;
+    use noodles_core_018::Position;
+    use noodles_csi_052::binning_index::index::reference_sequence::bin::Chunk;
 
     use super::*;
 
@@ -432,6 +494,7 @@ mod tests {
         let store = GffStore {
             features,
             name_index,
+            indexed_path: None,
         };
         let results = store.search("brca1");
         // BRCA1 exact match should appear first
@@ -443,6 +506,39 @@ mod tests {
             .map(|&i| store.features[i].name.as_deref().unwrap())
             .collect();
         assert!(names.contains(&"BRCA1"));
+    }
+
+    #[test]
+    fn indexed_gff_queries_visible_region_without_loaded_features() {
+        let path = std::env::temp_dir().join(format!(
+            "locus-gff-index-test-{}.gff.gz",
+            std::process::id()
+        ));
+        let index_path = associated_tabix_index_path(&path).unwrap();
+        write_indexed_gff_fixture(
+            &path,
+            &[
+                "chr1\t.\tgene\t100\t200\t.\t+\t.\tID=gene1;Name=ONE\n",
+                "chr1\t.\tgene\t300\t400\t.\t+\t.\tID=gene2;Name=TWO\n",
+                "chr2\t.\tgene\t100\t200\t.\t+\t.\tID=gene3;Name=THREE\n",
+            ],
+        )
+        .unwrap();
+
+        let mut store = GffStore::load(&path).unwrap();
+        assert!(store.has_tabix_index());
+        store.features.clear();
+
+        let features = store.features_in_region("chr1", 120, 350);
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(index_path);
+
+        let names = features
+            .iter()
+            .map(|feature| feature.name.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec![Some("ONE"), Some("TWO")]);
     }
 
     fn make_feature(
@@ -464,5 +560,38 @@ mod tests {
             parent: None,
             gene_name: None,
         }
+    }
+
+    fn write_indexed_gff_fixture(path: &Path, lines: &[&str]) -> io::Result<()> {
+        let file = File::create(path)?;
+        let mut writer = bgzf044::io::Writer::new(file);
+        let mut indexer = tabix::index::Indexer::default();
+
+        for line in lines {
+            let start_position = writer.virtual_position();
+            writer.write_all(line.as_bytes())?;
+            let end_position = writer.virtual_position();
+
+            let feature = parse_feature_line(line.trim_end())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid fixture"))?;
+            indexer.add_record(
+                &feature.seqname,
+                Position::try_from(
+                    usize::try_from(feature.start + 1)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+                )
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+                Position::try_from(
+                    usize::try_from(feature.end)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+                )
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+                Chunk::new(start_position, end_position),
+            )?;
+        }
+
+        writer.finish()?;
+        let index = indexer.build();
+        tabix::fs::write(associated_tabix_index_path(path).unwrap(), &index)
     }
 }
