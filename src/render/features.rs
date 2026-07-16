@@ -3,27 +3,15 @@ use std::collections::{HashMap, HashSet};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::Widget,
 };
 
-use crate::gff::GffFeature;
+use crate::{gff::GffFeature, theme::Theme};
 
 use super::ViewTransform;
 
 use crate::cache::Strand;
-
-/// Color scheme for feature types.
-fn feature_color(ty: &str) -> Color {
-    match ty {
-        "gene" | "pseudogene" => Color::Green,
-        "mRNA" | "transcript" | "lnc_RNA" | "ncRNA" | "pre_miRNA" => Color::Yellow,
-        "exon" => Color::Cyan,
-        "CDS" | "start_codon" | "stop_codon" => Color::Blue,
-        "UTR" | "five_prime_UTR" | "three_prime_UTR" => Color::Magenta,
-        _ => Color::DarkGray,
-    }
-}
 
 fn feature_glyph(ty: &str) -> char {
     match ty {
@@ -56,6 +44,7 @@ fn feature_priority(ty: &str) -> u8 {
 pub struct FeaturesTrack<'a> {
     pub features: &'a [&'a GffFeature],
     pub transform: ViewTransform,
+    pub theme: Theme,
 }
 
 #[derive(Debug)]
@@ -129,10 +118,10 @@ impl<'a> Widget for FeaturesTrack<'a> {
             for item in row {
                 match item {
                     FeatureRenderItem::Feature(feature) => {
-                        render_feature(feature, y, area, &self.transform, buf);
+                        render_feature(feature, y, area, &self.transform, self.theme, buf);
                     }
                     FeatureRenderItem::Model(model) => {
-                        render_model(model, y, area, &self.transform, buf);
+                        render_model(model, y, area, &self.transform, self.theme, buf);
                     }
                 }
             }
@@ -295,6 +284,7 @@ fn render_model(
     y: u16,
     area: Rect,
     transform: &ViewTransform,
+    theme: Theme,
     buf: &mut Buffer,
 ) {
     let pseudo_feature = GffFeature {
@@ -309,10 +299,10 @@ fn render_model(
         gene_name: None,
     };
 
-    render_feature(&pseudo_feature, y, area, transform, buf);
+    render_feature(&pseudo_feature, y, area, transform, theme, buf);
 
     for block in &model.blocks {
-        render_block(block, y, area, transform, buf);
+        render_block(block, y, area, transform, theme, buf);
     }
 }
 
@@ -321,6 +311,7 @@ fn render_block(
     y: u16,
     area: Rect,
     transform: &ViewTransform,
+    theme: Theme,
     buf: &mut Buffer,
 ) {
     let (col_start, col_end) = transform.bp_range_to_cols(block.start, block.end);
@@ -331,8 +322,8 @@ fn render_block(
     }
 
     let style = Style::default()
-        .fg(Color::Black)
-        .bg(feature_color(block.feature_type))
+        .fg(theme.feature_label_fg())
+        .bg(theme.feature_color(block.feature_type))
         .add_modifier(Modifier::BOLD);
     let ch = feature_glyph(block.feature_type);
     for x in x_start..x_end {
@@ -347,6 +338,7 @@ fn render_feature(
     y: u16,
     area: Rect,
     transform: &ViewTransform,
+    theme: Theme,
     buf: &mut Buffer,
 ) {
     let (col_start, col_end) = transform.bp_range_to_cols(feat.start, feat.end);
@@ -356,7 +348,7 @@ fn render_feature(
         return;
     }
 
-    let color = feature_color(&feat.feature_type);
+    let color = theme.feature_color(&feat.feature_type);
     let style = Style::default().fg(color);
     let width = (x_end - x_start) as usize;
 
@@ -387,7 +379,7 @@ fn render_feature(
         let label: String = name.chars().take(width.saturating_sub(2)).collect();
         let label_x = x_start + 1;
         let label_style = Style::default()
-            .fg(Color::Black)
+            .fg(theme.feature_label_fg())
             .bg(color)
             .add_modifier(Modifier::BOLD);
         for (i, ch) in label.chars().enumerate() {

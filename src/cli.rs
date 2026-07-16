@@ -20,6 +20,10 @@ pub struct Args {
     /// Reference FASTA for the reference track and mismatch coloring
     #[arg(long, short = 'f')]
     pub reference: Option<String>,
+
+    /// Start with the light color theme
+    #[arg(long)]
+    pub light: bool,
 }
 
 #[derive(Subcommand, Debug)]

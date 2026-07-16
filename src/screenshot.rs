@@ -12,7 +12,7 @@ use ratatui::{
     style::{Color, Modifier},
 };
 
-use crate::{app::App, ui};
+use crate::{app::App, theme::Theme, ui};
 
 const SCREENSHOT_DIR: &str = "screenshots";
 
@@ -31,7 +31,7 @@ pub fn save(app: &App) -> io::Result<ScreenshotPaths> {
     let paths = screenshot_paths()?;
     let buffer = terminal.backend().buffer();
     write_buffer(buffer, &paths.text)?;
-    write_html(buffer, &paths.html)?;
+    write_html(buffer, &paths.html, app.theme)?;
     Ok(paths)
 }
 
@@ -80,7 +80,7 @@ fn write_buffer(buffer: &Buffer, path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn write_html(buffer: &Buffer, path: &Path) -> io::Result<()> {
+fn write_html(buffer: &Buffer, path: &Path, theme: Theme) -> io::Result<()> {
     let mut file = File::create(path)?;
     writeln!(file, "<!doctype html>")?;
     writeln!(file, "<html lang=\"en\">")?;
@@ -93,7 +93,9 @@ fn write_html(buffer: &Buffer, path: &Path) -> io::Result<()> {
     writeln!(file, "<title>locus screenshot</title>")?;
     writeln!(
         file,
-        "<style>body{{margin:0;background:#111;color:#ddd}}pre{{margin:0;padding:16px;font:14px/1.2 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre;overflow:auto}}span{{display:inline}}</style>"
+        "<style>body{{margin:0;background:{};color:{}}}pre{{margin:0;padding:16px;font:14px/1.2 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre;overflow:auto}}span{{display:inline}}</style>",
+        theme.html_background(),
+        theme.html_foreground()
     )?;
     writeln!(file, "</head>")?;
     writeln!(file, "<body>")?;
@@ -421,15 +423,32 @@ mod tests {
         );
         buffer.set_string(1, 0, "<&", Style::default().fg(Color::Rgb(1, 2, 3)));
 
-        write_html(&buffer, &path).unwrap();
+        write_html(&buffer, &path, Theme::Dark).unwrap();
         let written = fs::read_to_string(&path).unwrap();
         let _ = fs::remove_file(path);
 
         assert!(written.contains("<!doctype html>"));
+        assert!(written.contains("background:#111;color:#ddd"));
         assert!(written.contains(
             "<span style=\"color:#ff0000;background-color:#000080;font-weight:700\">A</span>"
         ));
         assert!(written.contains("<span style=\"color:#010203\">&lt;&amp;</span>"));
+    }
+
+    #[test]
+    fn writes_light_html_page_colors() {
+        let path = std::env::temp_dir().join(format!(
+            "locus-screenshot-light-html-test-{}.html",
+            std::process::id()
+        ));
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 1, 1));
+        buffer.set_string(0, 0, "A", Style::default());
+
+        write_html(&buffer, &path, Theme::Light).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        let _ = fs::remove_file(path);
+
+        assert!(written.contains("background:#ffffff;color:#111111"));
     }
 
     #[test]

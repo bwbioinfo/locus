@@ -1,11 +1,11 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::Widget,
 };
 
-use crate::reference::ReferenceSlice;
+use crate::{reference::ReferenceSlice, theme::Theme};
 
 use super::ViewTransform;
 
@@ -14,6 +14,7 @@ const BASE_RENDER_THRESHOLD: f64 = 5.0;
 pub struct ReferenceTrack<'a> {
     pub reference: Option<&'a ReferenceSlice>,
     pub transform: ViewTransform,
+    pub theme: Theme,
 }
 
 impl Widget for ReferenceTrack<'_> {
@@ -24,12 +25,12 @@ impl Widget for ReferenceTrack<'_> {
 
         let y = area.y;
         let Some(reference) = self.reference else {
-            render_label("ref unavailable", y, area, buf);
+            render_label("ref unavailable", y, area, self.theme, buf);
             return;
         };
 
         if self.transform.bp_per_col() > BASE_RENDER_THRESHOLD {
-            render_span(reference, y, area, &self.transform, buf);
+            render_span(reference, y, area, &self.transform, self.theme, buf);
             return;
         }
 
@@ -46,7 +47,7 @@ impl Widget for ReferenceTrack<'_> {
             }
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char(base as char)
-                    .set_style(base_style(base).add_modifier(Modifier::BOLD));
+                    .set_style(base_style(base, self.theme).add_modifier(Modifier::BOLD));
             }
         }
     }
@@ -57,6 +58,7 @@ fn render_span(
     y: u16,
     area: Rect,
     transform: &ViewTransform,
+    theme: Theme,
     buf: &mut Buffer,
 ) {
     let (col_start, col_end) = transform.bp_range_to_cols(reference.start, reference.end());
@@ -65,26 +67,20 @@ fn render_span(
     for x in x_start..x_end {
         if let Some(cell) = buf.cell_mut((x, y)) {
             cell.set_char('─')
-                .set_style(Style::default().fg(Color::DarkGray));
+                .set_style(Style::default().fg(theme.subtle_fg()));
         }
     }
 }
 
-fn render_label(label: &str, y: u16, area: Rect, buf: &mut Buffer) {
+fn render_label(label: &str, y: u16, area: Rect, theme: Theme, buf: &mut Buffer) {
     for (i, ch) in label.chars().take(area.width as usize).enumerate() {
         if let Some(cell) = buf.cell_mut((area.x + i as u16, y)) {
             cell.set_char(ch)
-                .set_style(Style::default().fg(Color::DarkGray));
+                .set_style(Style::default().fg(theme.subtle_fg()));
         }
     }
 }
 
-fn base_style(base: u8) -> Style {
-    Style::default().fg(match base.to_ascii_uppercase() {
-        b'A' => Color::Green,
-        b'T' => Color::Red,
-        b'G' => Color::Yellow,
-        b'C' => Color::Blue,
-        _ => Color::DarkGray,
-    })
+fn base_style(base: u8, theme: Theme) -> Style {
+    Style::default().fg(theme.base_color(base))
 }

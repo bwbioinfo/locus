@@ -1,9 +1,6 @@
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Color, Style},
-    widgets::Widget,
-};
+use ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::Widget};
+
+use crate::theme::Theme;
 
 /// Unicode block characters for coverage histogram (8 levels + full block).
 const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -11,6 +8,7 @@ const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇',
 /// Coverage histogram widget.
 pub struct CoverageTrack<'a> {
     pub bins: &'a [u32],
+    pub theme: Theme,
 }
 
 impl<'a> Widget for CoverageTrack<'a> {
@@ -32,7 +30,7 @@ impl<'a> Widget for CoverageTrack<'a> {
             let fill_frac = cov as f64 / max_cov as f64;
             let fill_rows = (fill_frac * rows).round() as u16;
 
-            let col_style = coverage_style(fill_frac);
+            let col_style = coverage_style(fill_frac, self.theme);
 
             // Fill from the bottom
             for row_offset in 0..area.height {
@@ -58,13 +56,6 @@ impl<'a> Widget for CoverageTrack<'a> {
     }
 }
 
-fn coverage_style(frac: f64) -> Style {
-    let color = if frac > 0.8 {
-        Color::Red
-    } else if frac > 0.5 {
-        Color::Yellow
-    } else {
-        Color::Cyan
-    };
-    Style::default().fg(color)
+fn coverage_style(frac: f64, theme: Theme) -> Style {
+    Style::default().fg(theme.coverage_color(frac))
 }
