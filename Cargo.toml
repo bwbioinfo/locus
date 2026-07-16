@@ -31,6 +31,10 @@ noodles-sam = "0.68"
 noodles-core = "0.15"
 noodles-bgzf = "0.34"
 noodles-gff = "0.57"
+noodles-tabix = "0.58"
+noodles-core-018 = { package = "noodles-core", version = "0.18" }
+noodles-bgzf-044 = { package = "noodles-bgzf", version = "0.44" }
+noodles-csi-052 = { package = "noodles-csi", version = "0.52" }
 
 [profile.release]
 opt-level = 3

@@ -190,12 +190,11 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     // Features track (only when GFF loaded)
     if let Some(ref gff) = app.gff {
         let visible = app.current_region();
-        let feats: Vec<&crate::gff::GffFeature> = gff
-            .features_in_region(&visible.contig, visible.start, visible.end)
-            .collect();
+        let feats = gff.features_in_region(&visible.contig, visible.start, visible.end);
+        let feat_refs: Vec<&crate::gff::GffFeature> = feats.iter().collect();
         frame.render_widget(
             FeaturesTrack {
-                features: &feats,
+                features: &feat_refs,
                 transform,
             },
             chunks[chunk_idx],
