@@ -1,12 +1,16 @@
 use std::{
+    cmp::Ordering,
     collections::HashMap,
     fs::File,
-    io::{self, BufRead, BufReader, Read},
+    io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 use flate2::read::MultiGzDecoder;
+use noodles_bgzf_044 as bgzf044;
+use noodles_core_018::Position;
+use noodles_csi_052::binning_index::index::reference_sequence::bin::Chunk;
 use noodles_tabix as tabix;
 
 use crate::cache::Strand;
@@ -55,6 +59,69 @@ pub struct GffStore {
     /// lowercase-name → feature indices for fast search
     name_index: HashMap<String, Vec<usize>>,
     indexed_path: Option<PathBuf>,
+}
+
+pub struct PreparedAnnotation {
+    pub output_path: PathBuf,
+    pub index_path: PathBuf,
+    pub record_count: usize,
+}
+
+struct AnnotationRecord {
+    line: String,
+    feature: GffFeature,
+}
+
+pub fn prepare_indexed_annotation<P, Q>(input: P, output: Q) -> Result<PreparedAnnotation>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+{
+    let input = input.as_ref();
+    let output = output.as_ref();
+    if input == output {
+        anyhow::bail!("input and output annotation paths must be different");
+    }
+
+    let reader = open_annotation_reader(input)
+        .with_context(|| format!("opening annotation file {}", input.display()))?;
+    let mut header_lines = Vec::new();
+    let mut records = Vec::new();
+    let mut in_fasta = false;
+
+    for line_result in reader.lines() {
+        let line = line_result?;
+        let trimmed = line.trim();
+
+        if trimmed == "##FASTA" {
+            in_fasta = true;
+            continue;
+        }
+        if in_fasta || trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            header_lines.push(line);
+            continue;
+        }
+
+        if let Some(feature) = parse_feature_line(trimmed) {
+            records.push(AnnotationRecord {
+                line: trimmed.to_string(),
+                feature,
+            });
+        }
+    }
+
+    records.sort_by(compare_annotation_records);
+    write_bgzf_and_tabix(output, &header_lines, &records)?;
+
+    Ok(PreparedAnnotation {
+        output_path: output.to_path_buf(),
+        index_path: associated_tabix_index_path(output)
+            .context("output annotation path must have a valid file name")?,
+        record_count: records.len(),
+    })
 }
 
 impl GffStore {
@@ -221,6 +288,57 @@ fn tabix_region(contig: &str, start: u64, end: u64) -> io::Result<noodles_core_0
     format!("{contig}:{start}-{end}")
         .parse()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+}
+
+fn compare_annotation_records(a: &AnnotationRecord, b: &AnnotationRecord) -> Ordering {
+    a.feature
+        .seqname
+        .cmp(&b.feature.seqname)
+        .then_with(|| a.feature.start.cmp(&b.feature.start))
+        .then_with(|| a.feature.end.cmp(&b.feature.end))
+        .then_with(|| a.feature.feature_type.cmp(&b.feature.feature_type))
+        .then_with(|| a.line.cmp(&b.line))
+}
+
+fn write_bgzf_and_tabix(
+    output: &Path,
+    header_lines: &[String],
+    records: &[AnnotationRecord],
+) -> io::Result<()> {
+    let file = File::create(output)?;
+    let mut writer = bgzf044::io::Writer::new(file);
+    let mut indexer = tabix::index::Indexer::default();
+
+    for line in header_lines {
+        writer.write_all(line.as_bytes())?;
+        writer.write_all(b"\n")?;
+    }
+
+    for record in records {
+        let start_position = writer.virtual_position();
+        writer.write_all(record.line.as_bytes())?;
+        writer.write_all(b"\n")?;
+        let end_position = writer.virtual_position();
+
+        indexer.add_record(
+            &record.feature.seqname,
+            position_from_1based(record.feature.start + 1)?,
+            position_from_1based(record.feature.end)?,
+            Chunk::new(start_position, end_position),
+        )?;
+    }
+
+    writer.finish()?;
+    let index = indexer.build();
+    let index_path = associated_tabix_index_path(output)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid output path"))?;
+    tabix::fs::write(index_path, &index)
+}
+
+fn position_from_1based(position: u64) -> io::Result<Position> {
+    let position =
+        usize::try_from(position).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    Position::try_from(position).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }
 
 fn parse_feature_line(line: &str) -> Option<GffFeature> {
@@ -404,12 +522,9 @@ fn build_name_index(features: &[GffFeature]) -> HashMap<String, Vec<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, Write};
+    use std::io::Write;
 
     use flate2::{Compression, write::GzEncoder};
-    use noodles_bgzf_044 as bgzf044;
-    use noodles_core_018::Position;
-    use noodles_csi_052::binning_index::index::reference_sequence::bin::Chunk;
 
     use super::*;
 
@@ -509,29 +624,39 @@ mod tests {
     }
 
     #[test]
-    fn indexed_gff_queries_visible_region_without_loaded_features() {
-        let path = std::env::temp_dir().join(format!(
-            "locus-gff-index-test-{}.gff.gz",
+    fn prepare_annotation_sorts_bgzf_compresses_and_indexes() {
+        let input =
+            std::env::temp_dir().join(format!("locus-gff-prepare-test-{}.gff", std::process::id()));
+        let output = std::env::temp_dir().join(format!(
+            "locus-gff-prepare-test-{}.gff.gz",
             std::process::id()
         ));
-        let index_path = associated_tabix_index_path(&path).unwrap();
-        write_indexed_gff_fixture(
-            &path,
-            &[
-                "chr1\t.\tgene\t100\t200\t.\t+\t.\tID=gene1;Name=ONE\n",
+        let index_path = associated_tabix_index_path(&output).unwrap();
+        std::fs::write(
+            &input,
+            [
+                "##gff-version 3\n",
                 "chr1\t.\tgene\t300\t400\t.\t+\t.\tID=gene2;Name=TWO\n",
                 "chr2\t.\tgene\t100\t200\t.\t+\t.\tID=gene3;Name=THREE\n",
-            ],
+                "chr1\t.\tgene\t100\t200\t.\t+\t.\tID=gene1;Name=ONE\n",
+            ]
+            .concat(),
         )
         .unwrap();
 
-        let mut store = GffStore::load(&path).unwrap();
+        let prepared = prepare_indexed_annotation(&input, &output).unwrap();
+        assert_eq!(prepared.record_count, 3);
+        assert!(prepared.output_path.exists());
+        assert!(prepared.index_path.exists());
+
+        let mut store = GffStore::load(&output).unwrap();
         assert!(store.has_tabix_index());
         store.features.clear();
 
         let features = store.features_in_region("chr1", 120, 350);
 
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(input);
+        let _ = std::fs::remove_file(output);
         let _ = std::fs::remove_file(index_path);
 
         let names = features
@@ -560,38 +685,5 @@ mod tests {
             parent: None,
             gene_name: None,
         }
-    }
-
-    fn write_indexed_gff_fixture(path: &Path, lines: &[&str]) -> io::Result<()> {
-        let file = File::create(path)?;
-        let mut writer = bgzf044::io::Writer::new(file);
-        let mut indexer = tabix::index::Indexer::default();
-
-        for line in lines {
-            let start_position = writer.virtual_position();
-            writer.write_all(line.as_bytes())?;
-            let end_position = writer.virtual_position();
-
-            let feature = parse_feature_line(line.trim_end())
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid fixture"))?;
-            indexer.add_record(
-                &feature.seqname,
-                Position::try_from(
-                    usize::try_from(feature.start + 1)
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
-                )
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
-                Position::try_from(
-                    usize::try_from(feature.end)
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
-                )
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
-                Chunk::new(start_position, end_position),
-            )?;
-        }
-
-        writer.finish()?;
-        let index = indexer.build();
-        tabix::fs::write(associated_tabix_index_path(path).unwrap(), &index)
     }
 }
