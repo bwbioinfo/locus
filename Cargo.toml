@@ -1,6 +1,6 @@
 [package]
 name = "locus-tui"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "A terminal genome browser for BAM files"
 license = "MIT"
@@ -12,7 +12,8 @@ include = [
     "/Cargo.toml",
     "/LICENSE",
     "/README.md",
-    "/docs/**",
+    "/docs/captures/**",
+    "/docs/images/**",
     "/examples/**",
     "/src/**",
 ]
