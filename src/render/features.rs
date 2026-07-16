@@ -99,7 +99,7 @@ impl<'a> Widget for FeaturesTrack<'a> {
             let (col_start, col_end) = self.transform.bp_range_to_cols(item.start(), item.end());
             let target = row_ends
                 .iter()
-                .position(|&end| col_start >= end + 1)
+                .position(|&end| col_start > end)
                 .unwrap_or(row_ends.len());
 
             if target >= area.height as usize {
@@ -168,10 +168,10 @@ impl FeatureRenderItem<'_> {
 fn build_feature_models<'a>(features: &'a [&'a GffFeature]) -> Vec<FeatureModel<'a>> {
     let mut id_counts: HashMap<&str, usize> = HashMap::new();
     for feature in features {
-        if is_block_feature(&feature.feature_type) {
-            if let Some(id) = feature.id.as_deref() {
-                *id_counts.entry(id).or_default() += 1;
-            }
+        if is_block_feature(&feature.feature_type)
+            && let Some(id) = feature.id.as_deref()
+        {
+            *id_counts.entry(id).or_default() += 1;
         }
     }
 
@@ -384,10 +384,10 @@ fn render_feature(
             .add_modifier(Modifier::BOLD);
         for (i, ch) in label.chars().enumerate() {
             let lx = label_x + i as u16;
-            if lx < x_end {
-                if let Some(cell) = buf.cell_mut((lx, y)) {
-                    cell.set_char(ch).set_style(label_style);
-                }
+            if lx < x_end
+                && let Some(cell) = buf.cell_mut((lx, y))
+            {
+                cell.set_char(ch).set_style(label_style);
             }
         }
     }

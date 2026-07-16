@@ -35,21 +35,21 @@ impl<'a> Widget for CoverageTrack<'a> {
             // Fill from the bottom
             for row_offset in 0..area.height {
                 let row = area.height - 1 - row_offset;
-                if row_offset < fill_rows {
-                    if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
-                        // Top partial block for the first filled cell
-                        let ch = if row_offset + 1 == fill_rows && area.height > 1 {
-                            let partial = ((fill_frac * rows).fract() * 8.0) as usize;
-                            if partial > 0 {
-                                BLOCKS[partial.min(8)]
-                            } else {
-                                BLOCKS[8]
-                            }
+                if row_offset < fill_rows
+                    && let Some(cell) = buf.cell_mut((area.x + col, area.y + row))
+                {
+                    // Top partial block for the first filled cell
+                    let ch = if row_offset + 1 == fill_rows && area.height > 1 {
+                        let partial = ((fill_frac * rows).fract() * 8.0) as usize;
+                        if partial > 0 {
+                            BLOCKS[partial.min(8)]
                         } else {
                             BLOCKS[8]
-                        };
-                        cell.set_char(ch).set_style(col_style);
-                    }
+                        }
+                    } else {
+                        BLOCKS[8]
+                    };
+                    cell.set_char(ch).set_style(col_style);
                 }
             }
         }

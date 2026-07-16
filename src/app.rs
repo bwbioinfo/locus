@@ -224,14 +224,13 @@ impl App {
             return None;
         }
         let gaps = visible_insertion_gaps(&self.cache.reads, &self.cache.pileup_rows, transform);
-        if let Some(selected_ref_pos) = self.selected_insertion_ref_pos {
-            if let Some(gap) = gaps
+        if let Some(selected_ref_pos) = self.selected_insertion_ref_pos
+            && let Some(gap) = gaps
                 .iter()
                 .copied()
                 .find(|gap| gap.ref_pos == selected_ref_pos)
-            {
-                return Some(gap);
-            }
+        {
+            return Some(gap);
         }
         selected_insertion_gap(&self.cache.reads, &self.cache.pileup_rows, transform)
     }
@@ -284,7 +283,7 @@ impl App {
     /// If the new view is within the cached padded region, just re-layout without disk IO.
     /// Only set needs_fetch=true when the view has drifted outside the loaded window.
     fn mark_dirty(&mut self) {
-        let within_cache = self.cache.loaded_region.as_ref().map_or(false, |loaded| {
+        let within_cache = self.cache.loaded_region.as_ref().is_some_and(|loaded| {
             loaded.contig == self.current_contig()
                 && self.view_start >= loaded.start
                 && self.view_end <= loaded.end

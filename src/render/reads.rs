@@ -53,17 +53,16 @@ impl<'a> Widget for ReadsTrack<'a> {
                     continue;
                 };
                 if show_bases {
-                    render_bases(
-                        read,
-                        self.reference,
+                    let context = BaseRenderContext {
+                        reference: self.reference,
                         y,
                         area,
-                        &self.transform,
-                        self.expand_insertions,
-                        self.show_methylation,
-                        self.theme,
-                        buf,
-                    );
+                        transform: &self.transform,
+                        expand_insertions: self.expand_insertions,
+                        show_methylation: self.show_methylation,
+                        theme: self.theme,
+                    };
+                    render_bases(read, context, buf);
                 } else {
                     render_arrows(read, y, area, &self.transform, self.theme, buf);
                 }
@@ -125,23 +124,24 @@ pub fn visible_insertion_gaps(
 
 // ─── Base-level rendering (zoomed in) ────────────────────────────────────────
 
-/// Walk the CIGAR, rendering actual bases at reference positions.
-fn render_bases(
-    read: &RenderRead,
-    reference: Option<&ReferenceSlice>,
+#[derive(Clone, Copy)]
+struct BaseRenderContext<'a> {
+    reference: Option<&'a ReferenceSlice>,
     y: u16,
     area: Rect,
-    transform: &ViewTransform,
+    transform: &'a ViewTransform,
     expand_insertions: bool,
     show_methylation: bool,
     theme: Theme,
-    buf: &mut Buffer,
-) {
+}
+
+/// Walk the CIGAR, rendering actual bases at reference positions.
+fn render_bases(read: &RenderRead, context: BaseRenderContext<'_>, buf: &mut Buffer) {
     let mut read_pos: usize = 0;
     let mut ref_pos: u64 = read.start;
     let mut insertions = Vec::new();
     let dim = read.is_secondary || read.is_supplementary;
-    let methylation_calls = if show_methylation {
+    let methylation_calls = if context.show_methylation {
         read.aligned_methylation()
     } else {
         Vec::new()
@@ -158,13 +158,23 @@ fn render_bases(
                 let is_mismatch_op = matches!(op, CigarOp::Mismatch(_));
                 for _ in 0..n {
                     let base = read.sequence.get(read_pos).copied().unwrap_or(b'N');
-                    let ref_base = reference.and_then(|reference| reference.base_at(ref_pos));
+                    let ref_base = context
+                        .reference
+                        .and_then(|reference| reference.base_at(ref_pos));
                     let mut style =
-                        aligned_base_style(base, ref_base, is_mismatch_op, read.mapq, dim, theme);
+                        aligned_base_style(base, ref_base, is_mismatch_op, dim, context.theme);
                     if let Some(call) = methylation_call_at(&methylation_calls, read_pos, ref_pos) {
-                        style = methylation_base_style(style, call.probability, theme);
+                        style = methylation_base_style(style, call.probability, context.theme);
                     }
-                    draw_at_ref_pos(ref_pos, y, base as char, style, area, transform, buf);
+                    draw_at_ref_pos(
+                        ref_pos,
+                        context.y,
+                        base as char,
+                        style,
+                        context.area,
+                        context.transform,
+                        buf,
+                    );
                     read_pos += 1;
                     ref_pos += 1;
                 }
@@ -182,8 +192,16 @@ fn render_bases(
 
             CigarOp::Deletion(n) => {
                 for _ in 0..n {
-                    let style = deletion_style(theme);
-                    draw_at_ref_pos(ref_pos, y, '-', style, area, transform, buf);
+                    let style = deletion_style(context.theme);
+                    draw_at_ref_pos(
+                        ref_pos,
+                        context.y,
+                        '-',
+                        style,
+                        context.area,
+                        context.transform,
+                        buf,
+                    );
                     ref_pos += 1;
                 }
             }
@@ -191,39 +209,61 @@ fn render_bases(
             CigarOp::Skip(n) => {
                 // Intron / large skip: thin line
                 for _ in 0..n {
-                    let style = skip_style(theme);
-                    draw_at_ref_pos(ref_pos, y, '─', style, area, transform, buf);
+                    let style = skip_style(context.theme);
+                    draw_at_ref_pos(
+                        ref_pos,
+                        context.y,
+                        '─',
+                        style,
+                        context.area,
+                        context.transform,
+                        buf,
+                    );
                     ref_pos += 1;
                 }
             }
         }
     }
 
-    let selected_gap = expand_insertions
-        .then_some(transform.insertion_gap)
+    let selected_gap = context
+        .expand_insertions
+        .then_some(context.transform.insertion_gap)
         .flatten();
     for insertion in insertions {
         if selected_gap.is_some_and(|gap| gap.ref_pos == insertion.ref_pos) {
-            render_inserted_bases(read, insertion, y, area, transform, theme, buf);
+            render_inserted_bases(read, insertion, context, buf);
         } else {
             draw_at_ref_pos(
                 insertion.ref_pos,
-                y,
+                context.y,
                 'I',
-                insertion_marker_style(theme),
-                area,
-                transform,
+                insertion_marker_style(context.theme),
+                context.area,
+                context.transform,
                 buf,
             );
         }
-        emphasize_insertion_boundaries(insertion.ref_pos, y, area, transform, buf);
+        emphasize_insertion_boundaries(
+            insertion.ref_pos,
+            context.y,
+            context.area,
+            context.transform,
+            buf,
+        );
     }
 
-    if let Some(gap) = selected_gap {
-        if read.start < gap.ref_pos && read.end > gap.ref_pos {
-            draw_insertion_box(gap.ref_pos, y, area, transform, theme, buf);
-            emphasize_insertion_boundaries(gap.ref_pos, y, area, transform, buf);
-        }
+    if let Some(gap) = selected_gap
+        && read.start < gap.ref_pos
+        && read.end > gap.ref_pos
+    {
+        draw_insertion_box(gap.ref_pos, context, buf);
+        emphasize_insertion_boundaries(
+            gap.ref_pos,
+            context.y,
+            context.area,
+            context.transform,
+            buf,
+        );
     }
 }
 
@@ -242,20 +282,17 @@ fn draw_at_ref_pos(
         return;
     };
     let x = area.x + col;
-    if x < area.x + area.width {
-        if let Some(cell) = buf.cell_mut((x, y)) {
-            cell.set_char(ch).set_style(style);
-        }
+    if x < area.x + area.width
+        && let Some(cell) = buf.cell_mut((x, y))
+    {
+        cell.set_char(ch).set_style(style);
     }
 }
 
 fn render_inserted_bases(
     read: &RenderRead,
     insertion: InsertionEvent,
-    y: u16,
-    area: Rect,
-    transform: &ViewTransform,
-    theme: Theme,
+    context: BaseRenderContext<'_>,
     buf: &mut Buffer,
 ) {
     for i in 0..insertion.len {
@@ -264,43 +301,37 @@ fn render_inserted_bases(
             .get(insertion.read_pos + i as usize)
             .copied()
             .unwrap_or(b'N');
-        let Some(col) = transform.insertion_col(insertion.ref_pos, i) else {
+        let Some(col) = context.transform.insertion_col(insertion.ref_pos, i) else {
             continue;
         };
-        let x = area.x + col;
-        if x < area.x + area.width {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_char(base as char)
-                    .set_style(insertion_base_style(base, theme));
-            }
+        let x = context.area.x + col;
+        if x < context.area.x + context.area.width
+            && let Some(cell) = buf.cell_mut((x, context.y))
+        {
+            cell.set_char(base as char)
+                .set_style(insertion_base_style(base, context.theme));
         }
     }
 }
 
-fn draw_insertion_box(
-    insertion_ref_pos: u64,
-    y: u16,
-    area: Rect,
-    transform: &ViewTransform,
-    theme: Theme,
-    buf: &mut Buffer,
-) {
-    let Some((left_col, right_col)) = transform.insertion_border_cols(insertion_ref_pos) else {
+fn draw_insertion_box(insertion_ref_pos: u64, context: BaseRenderContext<'_>, buf: &mut Buffer) {
+    let Some((left_col, right_col)) = context.transform.insertion_border_cols(insertion_ref_pos)
+    else {
         return;
     };
-    let style = insertion_box_style(theme);
-    let left_x = area.x + left_col;
-    let right_x = area.x + right_col;
+    let style = insertion_box_style(context.theme);
+    let left_x = context.area.x + left_col;
+    let right_x = context.area.x + right_col;
 
-    if left_x < area.x + area.width {
-        if let Some(cell) = buf.cell_mut((left_x, y)) {
-            cell.set_char('[').set_style(style);
-        }
+    if left_x < context.area.x + context.area.width
+        && let Some(cell) = buf.cell_mut((left_x, context.y))
+    {
+        cell.set_char('[').set_style(style);
     }
-    if right_x < area.x + area.width {
-        if let Some(cell) = buf.cell_mut((right_x, y)) {
-            cell.set_char(']').set_style(style);
-        }
+    if right_x < context.area.x + context.area.width
+        && let Some(cell) = buf.cell_mut((right_x, context.y))
+    {
+        cell.set_char(']').set_style(style);
     }
 }
 
@@ -403,10 +434,10 @@ fn render_arrows(
 
         let (style, ch) = arrow_op_style(&op, read, theme);
         for x in ox_start..ox_end {
-            if x < area.x + area.width {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char(ch).set_style(style);
-                }
+            if x < area.x + area.width
+                && let Some(cell) = buf.cell_mut((x, y))
+            {
+                cell.set_char(ch).set_style(style);
             }
         }
         if ref_len > 0 {
@@ -514,14 +545,13 @@ fn aligned_base_style(
     base: u8,
     ref_base: Option<u8>,
     is_mismatch_op: bool,
-    mapq: u8,
     dim: bool,
     theme: Theme,
 ) -> Style {
     if is_mismatch_op || ref_base.is_some_and(|ref_base| bases_mismatch(base, ref_base)) {
         mismatch_style(base, theme)
     } else {
-        match_style(base, mapq, dim, theme)
+        match_style(base, dim, theme)
     }
 }
 
@@ -534,15 +564,9 @@ fn bases_mismatch(base: u8, ref_base: u8) -> bool {
 }
 
 /// Style for a matched base: color by nucleotide identity, dim if low mapq.
-fn match_style(base: u8, mapq: u8, dim: bool, theme: Theme) -> Style {
+fn match_style(base: u8, dim: bool, theme: Theme) -> Style {
     let fg = base_color(base, theme);
-    // Background hint based on mapq so you can tell low-quality reads apart
-    let bg = if mapq < 10 {
-        Color::Reset
-    } else {
-        Color::Reset
-    };
-    let mut style = Style::default().fg(fg).bg(bg);
+    let mut style = Style::default().fg(fg).bg(Color::Reset);
     if dim {
         style = style.add_modifier(Modifier::DIM);
     }
@@ -597,6 +621,30 @@ mod tests {
     use super::*;
     use crate::cache::{ModificationStrand, ModifiedBaseCall};
 
+    fn render_test_bases(
+        read: &RenderRead,
+        area: Rect,
+        transform: &ViewTransform,
+        expand_insertions: bool,
+        show_methylation: bool,
+        theme: Theme,
+        buf: &mut Buffer,
+    ) {
+        render_bases(
+            read,
+            BaseRenderContext {
+                reference: None,
+                y: 0,
+                area,
+                transform,
+                expand_insertions,
+                show_methylation,
+                theme,
+            },
+            buf,
+        );
+    }
+
     #[test]
     fn bases_mismatch_only_for_canonical_base_differences() {
         assert!(!bases_mismatch(b'A', b'a'));
@@ -607,17 +655,17 @@ mod tests {
 
     #[test]
     fn reference_difference_uses_mismatch_style() {
-        let style = aligned_base_style(b'A', Some(b'C'), false, 60, false, Theme::Dark);
+        let style = aligned_base_style(b'A', Some(b'C'), false, false, Theme::Dark);
         assert_eq!(style.bg, Some(Color::Green));
 
-        let style = aligned_base_style(b'A', Some(b'A'), false, 60, false, Theme::Dark);
+        let style = aligned_base_style(b'A', Some(b'A'), false, false, Theme::Dark);
         assert_eq!(style.bg, Some(Color::Reset));
         assert_eq!(style.fg, Some(Color::Green));
     }
 
     #[test]
     fn light_theme_uses_readable_base_and_methylation_colors() {
-        let base_style = aligned_base_style(b'G', Some(b'G'), false, 60, false, Theme::Light);
+        let base_style = aligned_base_style(b'G', Some(b'G'), false, false, Theme::Light);
         assert_eq!(base_style.fg, Some(Color::Rgb(132, 89, 0)));
 
         let methylated = methylation_base_style(base_style, Some(240), Theme::Light);
@@ -652,17 +700,7 @@ mod tests {
         }));
         let mut buf = Buffer::empty(area);
 
-        render_bases(
-            &read,
-            None,
-            0,
-            area,
-            &transform,
-            true,
-            false,
-            Theme::Dark,
-            &mut buf,
-        );
+        render_test_bases(&read, area, &transform, true, false, Theme::Dark, &mut buf);
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
@@ -704,17 +742,7 @@ mod tests {
         let transform = ViewTransform::new(10, 25, 3);
         let mut buf = Buffer::empty(area);
 
-        render_bases(
-            &read,
-            None,
-            0,
-            area,
-            &transform,
-            false,
-            false,
-            Theme::Dark,
-            &mut buf,
-        );
+        render_test_bases(&read, area, &transform, false, false, Theme::Dark, &mut buf);
 
         assert_eq!(buf[(0, 0)].symbol(), "I");
         assert_eq!(buf[(0, 0)].style().bg, Some(Color::Magenta));
@@ -803,17 +831,7 @@ mod tests {
         }));
         let mut buf = Buffer::empty(area);
 
-        render_bases(
-            &read,
-            None,
-            0,
-            area,
-            &transform,
-            true,
-            false,
-            Theme::Dark,
-            &mut buf,
-        );
+        render_test_bases(&read, area, &transform, true, false, Theme::Dark, &mut buf);
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
@@ -859,17 +877,7 @@ mod tests {
         }));
         let mut buf = Buffer::empty(area);
 
-        render_bases(
-            &read,
-            None,
-            0,
-            area,
-            &transform,
-            true,
-            false,
-            Theme::Dark,
-            &mut buf,
-        );
+        render_test_bases(&read, area, &transform, true, false, Theme::Dark, &mut buf);
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
@@ -900,17 +908,7 @@ mod tests {
         let transform = ViewTransform::new(10, 18, 8);
         let mut buf = Buffer::empty(area);
 
-        render_bases(
-            &read,
-            None,
-            0,
-            area,
-            &transform,
-            false,
-            false,
-            Theme::Dark,
-            &mut buf,
-        );
+        render_test_bases(&read, area, &transform, false, false, Theme::Dark, &mut buf);
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
@@ -944,17 +942,7 @@ mod tests {
         let transform = ViewTransform::new(10, 14, 4);
         let mut buf = Buffer::empty(area);
 
-        render_bases(
-            &read,
-            None,
-            0,
-            area,
-            &transform,
-            false,
-            true,
-            Theme::Dark,
-            &mut buf,
-        );
+        render_test_bases(&read, area, &transform, false, true, Theme::Dark, &mut buf);
 
         assert_eq!(buf[(1, 0)].symbol(), "C");
         assert_eq!(buf[(1, 0)].style().fg, Some(Color::Black));
@@ -995,17 +983,7 @@ mod tests {
         }));
         let mut buf = Buffer::empty(area);
 
-        render_bases(
-            &read,
-            None,
-            0,
-            area,
-            &transform,
-            true,
-            true,
-            Theme::Dark,
-            &mut buf,
-        );
+        render_test_bases(&read, area, &transform, true, true, Theme::Dark, &mut buf);
 
         assert_eq!(buf[(5, 0)].symbol(), "T");
         assert_eq!(buf[(5, 0)].style().fg, Some(Color::White));
