@@ -1,0 +1,6 @@
+##gff-version 3
+chrDemo	demo	exon	90	115	.	+	.	ID=demo.exon2;Parent=demo.tx1;Name=exon2
+chrDemo	demo	gene	45	120	.	+	.	ID=demo.gene1;Name=DEMO1;gene_name=DEMO1
+chrDemo	demo	mRNA	45	120	.	+	.	ID=demo.tx1;Parent=demo.gene1;Name=DEMO1-201
+chrDemo	demo	exon	45	72	.	+	.	ID=demo.exon1;Parent=demo.tx1;Name=exon1
+chrDemo	demo	CDS	55	102	.	+	0	ID=demo.cds1;Parent=demo.tx1
