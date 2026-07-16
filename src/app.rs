@@ -11,6 +11,7 @@ use crate::{
         reads::{selected_insertion_gap, visible_insertion_gaps},
     },
     screenshot,
+    theme::Theme,
 };
 
 /// UI interaction mode.
@@ -56,6 +57,7 @@ pub struct App {
     pub expand_insertions: bool,
     pub selected_insertion_ref_pos: Option<u64>,
     pub show_methylation: bool,
+    pub theme: Theme,
 
     /// Set to true to request a clean exit
     pub should_quit: bool,
@@ -75,6 +77,7 @@ impl App {
         gff: Option<GffStore>,
         reference: Option<ReferenceStore>,
         initial_region: Option<Region>,
+        theme: Theme,
     ) -> Result<Self> {
         let (view_start, view_end) = if let Some(ref r) = initial_region {
             (r.start, r.end)
@@ -116,6 +119,7 @@ impl App {
             expand_insertions: false,
             selected_insertion_ref_pos: None,
             show_methylation: false,
+            theme,
             should_quit: false,
             needs_fetch: true,
             feature_matches: Vec::new(),
@@ -175,6 +179,11 @@ impl App {
         } else {
             "methylation hidden".to_string()
         });
+    }
+
+    pub fn toggle_theme(&mut self) {
+        self.theme = self.theme.toggle();
+        self.status_msg = Some(format!("{} theme", self.theme.name()));
     }
 
     pub fn cycle_insertion_expansion(&mut self, forward: bool) {

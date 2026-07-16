@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
@@ -30,7 +30,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Overlays (drawn on top)
     if app.show_help || app.mode == Mode::Help {
-        draw_help_overlay(frame, area);
+        draw_help_overlay(frame, app, area);
     }
     if app.mode == Mode::GoTo {
         draw_goto_overlay(frame, app, area);
@@ -62,9 +62,10 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     );
     let insertion_mode = insertion_mode_label(app.expand_insertions);
     let methylation_mode = methylation_mode_label(app.show_methylation);
+    let theme_mode = theme_mode_label(app.theme);
     let metrics = format!(
-        " scale:{:.1} bp/col  reads:{}  {}  {} ",
-        bp_per_col, read_count, insertion_mode, methylation_mode
+        " scale:{:.1} bp/col  reads:{}  {}  {}  {} ",
+        bp_per_col, read_count, insertion_mode, methylation_mode, theme_mode
     );
     let mut status = app.status_msg.as_ref().map(|msg| format!(" status:{msg} "));
 
@@ -89,19 +90,22 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(
             identity,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(app.theme.brand_fg())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" ".repeat(pad_len)),
-        Span::styled(metrics, Style::default().fg(Color::White)),
+        Span::styled(metrics, Style::default().fg(app.theme.chrome_fg())),
     ];
 
     if let Some(status) = status {
-        spans.push(Span::styled(status, Style::default().fg(Color::Yellow)));
+        spans.push(Span::styled(
+            status,
+            Style::default().fg(app.theme.status_fg()),
+        ));
     }
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::DarkGray)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(app.theme.chrome_bg())),
         area,
     );
 }
@@ -116,6 +120,13 @@ fn insertion_mode_label(expanded: bool) -> &'static str {
 
 fn methylation_mode_label(shown: bool) -> &'static str {
     if shown { "meth:on" } else { "meth:off" }
+}
+
+fn theme_mode_label(theme: crate::theme::Theme) -> &'static str {
+    match theme {
+        crate::theme::Theme::Dark => "theme:dark",
+        crate::theme::Theme::Light => "theme:light",
+    }
 }
 
 fn truncate_to_width(text: &str, width: usize) -> String {
@@ -181,6 +192,7 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
             ReferenceTrack {
                 reference: app.cache.reference.as_ref(),
                 transform,
+                theme: app.theme,
             },
             chunks[chunk_idx],
         );
@@ -196,6 +208,7 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
             FeaturesTrack {
                 features: &feat_refs,
                 transform,
+                theme: app.theme,
             },
             chunks[chunk_idx],
         );
@@ -206,6 +219,7 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         CoverageTrack {
             bins: &app.cache.coverage,
+            theme: app.theme,
         },
         chunks[chunk_idx],
     );
@@ -222,6 +236,7 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
             show_names,
             expand_insertions: app.expand_insertions,
             show_methylation: app.show_methylation,
+            theme: app.theme,
         },
         chunks[chunk_idx],
     );
@@ -236,7 +251,7 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
             height: 1,
         };
         frame.render_widget(
-            Paragraph::new(msg).style(Style::default().fg(Color::Yellow)),
+            Paragraph::new(msg).style(Style::default().fg(app.theme.status_fg())),
             notice_area,
         );
     }
@@ -246,9 +261,9 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
     let keys = match app.mode {
         Mode::Normal => {
             if app.gff.is_some() {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
             } else {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
             }
         }
         Mode::GoTo => " Enter:confirm  Esc:cancel",
@@ -257,7 +272,11 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Help => " Esc/q/?:close help",
     };
     frame.render_widget(
-        Paragraph::new(keys).style(Style::default().bg(Color::DarkGray).fg(Color::White)),
+        Paragraph::new(keys).style(
+            Style::default()
+                .bg(app.theme.chrome_bg())
+                .fg(app.theme.chrome_fg()),
+        ),
         area,
     );
 }
@@ -273,7 +292,7 @@ fn draw_goto_overlay(frame: &mut Frame, app: &App, area: Rect) {
                     .title(" Jump to Region ")
                     .borders(Borders::ALL),
             )
-            .style(Style::default().fg(Color::White)),
+            .style(Style::default().fg(app.theme.chrome_fg())),
         popup,
     );
 }
@@ -309,7 +328,7 @@ fn draw_feature_search_overlay(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(format!("{}_", app.command_buffer))
             .block(Block::default().title(title).borders(Borders::ALL))
-            .style(Style::default().fg(Color::White)),
+            .style(Style::default().fg(app.theme.chrome_fg())),
         parts[0],
     );
 
@@ -338,8 +357,8 @@ fn draw_feature_search_overlay(frame: &mut Frame, app: &App, area: Rect) {
             let marker = if i == sel { "▶ " } else { "  " };
             let style = if i == sel {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Green)
+                    .fg(app.theme.feature_label_fg())
+                    .bg(app.theme.feature_color("gene"))
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -375,7 +394,7 @@ fn draw_contig_overlay(frame: &mut Frame, app: &App, area: Rect) {
             let marker = if i == app.contig_idx { "▶ " } else { "  " };
             let style = if i == app.contig_idx {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(app.theme.brand_fg())
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -394,7 +413,7 @@ fn draw_contig_overlay(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_help_overlay(frame: &mut Frame, area: Rect) {
+fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let popup = centered_rect(60, 80, area);
     frame.render_widget(Clear, popup);
 
@@ -413,6 +432,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("  ↓ / -      Zoom out"),
         Line::from("  i          Toggle expanded insertion sequence"),
         Line::from("  m          Toggle read methylation"),
+        Line::from("  t          Toggle dark/light theme"),
         Line::from("  Tab        Move to next expanded insertion"),
         Line::from("  Shift+Tab  Move to previous expanded insertion"),
         Line::from("  g          Go to region  (e.g. chr1:1000-2000)"),
@@ -446,6 +466,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
     frame.render_widget(
         Paragraph::new(help_text)
             .block(Block::default().title(" Help ").borders(Borders::ALL))
+            .style(Style::default().fg(app.theme.chrome_fg()))
             .wrap(Wrap { trim: false }),
         popup,
     );
@@ -484,5 +505,11 @@ mod tests {
     fn insertion_mode_label_reflects_toggle_state() {
         assert_eq!(insertion_mode_label(false), "ins:collapsed");
         assert_eq!(insertion_mode_label(true), "ins:expanded");
+    }
+
+    #[test]
+    fn theme_mode_label_reflects_theme_state() {
+        assert_eq!(theme_mode_label(crate::theme::Theme::Dark), "theme:dark");
+        assert_eq!(theme_mode_label(crate::theme::Theme::Light), "theme:light");
     }
 }

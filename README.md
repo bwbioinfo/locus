@@ -33,6 +33,9 @@ locus sample.bam --reference hg38.fa
 # With annotations for feature rendering and gene search
 locus sample.bam --gff hg38.ncbiRefSeq.gtf.gz
 
+# Start in light mode
+locus sample.bam --light
+
 # Prepare a sorted, BGZF-compressed, tabix-indexed annotation file
 locus prepare-annotations hg38.ncbiRefSeq.gtf --output hg38.ncbiRefSeq.sorted.gtf.gz
 ```
@@ -59,10 +62,13 @@ The demo region includes:
 - MM/ML methylation calls shown with `m`
 - a feature track loaded from a tabix-indexed GFF
 - an app-generated screenshot captured with `s`
+- dark and light terminal color themes toggled with `t`
 
 ![Locus demo showing expanded insertion, methylation, and feature tracks](docs/images/demo-expanded-methylation.png)
 
-The committed image was rendered from the app-generated HTML screenshot in [`docs/captures/demo-expanded-methylation.html`](docs/captures/demo-expanded-methylation.html). To rebuild the demo data, run:
+![Locus demo in light mode](docs/images/demo-light-expanded-methylation.png)
+
+The committed images were rendered from app-generated HTML screenshots under [`docs/captures/`](docs/captures/). To rebuild the demo data, run:
 
 ```bash
 examples/demo/build.sh
@@ -83,6 +89,7 @@ To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capt
 | `-` | Zoom out |
 | `i` | Toggle expanded insertion sequence |
 | `m` | Toggle read methylation display |
+| `t` | Toggle dark/light theme |
 | `Tab` / `Shift+Tab` | Move to next / previous expanded insertion |
 | `g` | Go to region (e.g. `chr1:100000-200000`) |
 | `c` | Contig selector |
@@ -133,6 +140,11 @@ Methylation display:
 - Calls are rendered on aligned read bases after CIGAR mapping; soft-clipped or inserted bases are parsed but not drawn as reference-aligned methylation marks.
 
 The demo BAM includes forward and reverse-strand MM/ML calls so the `m` toggle visibly changes the read pileup.
+
+Theme display:
+- Use `--light` to start with the light palette.
+- Press `t` to switch between the default dark palette and light mode while browsing.
+- App-generated HTML screenshots keep the active theme background and foreground colors.
 
 Feature track:
 - `─>─` / `─<─` — transcript or gene backbone, including intronic span

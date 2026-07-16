@@ -7,6 +7,7 @@ use ratatui::{
 
 use crate::cache::{AlignedModifiedBaseCall, CigarOp, PileupRow, RenderRead, Strand};
 use crate::reference::ReferenceSlice;
+use crate::theme::Theme;
 
 use super::{InsertionGap, ViewTransform};
 
@@ -30,6 +31,7 @@ pub struct ReadsTrack<'a> {
     pub show_names: bool,
     pub expand_insertions: bool,
     pub show_methylation: bool,
+    pub theme: Theme,
 }
 
 impl<'a> Widget for ReadsTrack<'a> {
@@ -59,10 +61,11 @@ impl<'a> Widget for ReadsTrack<'a> {
                         &self.transform,
                         self.expand_insertions,
                         self.show_methylation,
+                        self.theme,
                         buf,
                     );
                 } else {
-                    render_arrows(read, y, area, &self.transform, buf);
+                    render_arrows(read, y, area, &self.transform, self.theme, buf);
                 }
             }
         }
@@ -131,6 +134,7 @@ fn render_bases(
     transform: &ViewTransform,
     expand_insertions: bool,
     show_methylation: bool,
+    theme: Theme,
     buf: &mut Buffer,
 ) {
     let mut read_pos: usize = 0;
@@ -156,9 +160,9 @@ fn render_bases(
                     let base = read.sequence.get(read_pos).copied().unwrap_or(b'N');
                     let ref_base = reference.and_then(|reference| reference.base_at(ref_pos));
                     let mut style =
-                        aligned_base_style(base, ref_base, is_mismatch_op, read.mapq, dim);
+                        aligned_base_style(base, ref_base, is_mismatch_op, read.mapq, dim, theme);
                     if let Some(call) = methylation_call_at(&methylation_calls, read_pos, ref_pos) {
-                        style = methylation_base_style(style, call.probability);
+                        style = methylation_base_style(style, call.probability, theme);
                     }
                     draw_at_ref_pos(ref_pos, y, base as char, style, area, transform, buf);
                     read_pos += 1;
@@ -178,7 +182,7 @@ fn render_bases(
 
             CigarOp::Deletion(n) => {
                 for _ in 0..n {
-                    let style = Style::default().fg(Color::White).bg(Color::DarkGray);
+                    let style = deletion_style(theme);
                     draw_at_ref_pos(ref_pos, y, '-', style, area, transform, buf);
                     ref_pos += 1;
                 }
@@ -187,7 +191,7 @@ fn render_bases(
             CigarOp::Skip(n) => {
                 // Intron / large skip: thin line
                 for _ in 0..n {
-                    let style = Style::default().fg(Color::DarkGray);
+                    let style = skip_style(theme);
                     draw_at_ref_pos(ref_pos, y, '─', style, area, transform, buf);
                     ref_pos += 1;
                 }
@@ -200,13 +204,13 @@ fn render_bases(
         .flatten();
     for insertion in insertions {
         if selected_gap.is_some_and(|gap| gap.ref_pos == insertion.ref_pos) {
-            render_inserted_bases(read, insertion, y, area, transform, buf);
+            render_inserted_bases(read, insertion, y, area, transform, theme, buf);
         } else {
             draw_at_ref_pos(
                 insertion.ref_pos,
                 y,
                 'I',
-                insertion_marker_style(),
+                insertion_marker_style(theme),
                 area,
                 transform,
                 buf,
@@ -217,7 +221,7 @@ fn render_bases(
 
     if let Some(gap) = selected_gap {
         if read.start < gap.ref_pos && read.end > gap.ref_pos {
-            draw_insertion_box(gap.ref_pos, y, area, transform, buf);
+            draw_insertion_box(gap.ref_pos, y, area, transform, theme, buf);
             emphasize_insertion_boundaries(gap.ref_pos, y, area, transform, buf);
         }
     }
@@ -251,6 +255,7 @@ fn render_inserted_bases(
     y: u16,
     area: Rect,
     transform: &ViewTransform,
+    theme: Theme,
     buf: &mut Buffer,
 ) {
     for i in 0..insertion.len {
@@ -266,7 +271,7 @@ fn render_inserted_bases(
         if x < area.x + area.width {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char(base as char)
-                    .set_style(insertion_base_style(base));
+                    .set_style(insertion_base_style(base, theme));
             }
         }
     }
@@ -277,12 +282,13 @@ fn draw_insertion_box(
     y: u16,
     area: Rect,
     transform: &ViewTransform,
+    theme: Theme,
     buf: &mut Buffer,
 ) {
     let Some((left_col, right_col)) = transform.insertion_border_cols(insertion_ref_pos) else {
         return;
     };
-    let style = insertion_box_style();
+    let style = insertion_box_style(theme);
     let left_x = area.x + left_col;
     let right_x = area.x + right_col;
 
@@ -371,6 +377,7 @@ fn render_arrows(
     y: u16,
     area: Rect,
     transform: &ViewTransform,
+    theme: Theme,
     buf: &mut Buffer,
 ) {
     let (col_start, col_end) = transform.bp_range_to_cols(read.start, read.end);
@@ -394,7 +401,7 @@ fn render_arrows(
         let ox_start = (area.x + oc_start).max(x_start);
         let ox_end = (area.x + oc_end).min(x_end);
 
-        let (style, ch) = arrow_op_style(&op, read);
+        let (style, ch) = arrow_op_style(&op, read, theme);
         for x in ox_start..ox_end {
             if x < area.x + area.width {
                 if let Some(cell) = buf.cell_mut((x, y)) {
@@ -412,7 +419,7 @@ fn render_arrows(
             insertion_ref_pos,
             y,
             'I',
-            insertion_marker_style(),
+            insertion_marker_style(theme),
             area,
             transform,
             buf,
@@ -420,49 +427,51 @@ fn render_arrows(
     }
 
     if read.cigar_ops.is_empty() && x_start < x_end {
-        let style = mapq_style(read.mapq, read.is_secondary || read.is_supplementary);
+        let style = mapq_style(read.mapq, read.is_secondary || read.is_supplementary, theme);
         if let Some(cell) = buf.cell_mut((x_start, y)) {
             cell.set_char(strand_char(read.strand)).set_style(style);
         }
     }
 }
 
-fn arrow_op_style(op: &CigarOp, read: &RenderRead) -> (Style, char) {
+fn arrow_op_style(op: &CigarOp, read: &RenderRead, theme: Theme) -> (Style, char) {
     match op {
         CigarOp::Match(_) => (
-            mapq_style(read.mapq, read.is_secondary || read.is_supplementary),
+            mapq_style(read.mapq, read.is_secondary || read.is_supplementary, theme),
             strand_char(read.strand),
         ),
         CigarOp::Mismatch(_) => (
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.base_color(b'T'))
+                .add_modifier(Modifier::BOLD),
             'X',
         ),
-        CigarOp::Insertion(_) => (insertion_marker_style(), 'I'),
-        CigarOp::Deletion(_) => (Style::default().fg(Color::White).bg(Color::DarkGray), '-'),
-        CigarOp::Skip(_) => (Style::default().fg(Color::DarkGray), '─'),
-        CigarOp::SoftClip(_) => (Style::default().fg(Color::DarkGray), '.'),
+        CigarOp::Insertion(_) => (insertion_marker_style(theme), 'I'),
+        CigarOp::Deletion(_) => (deletion_style(theme), '-'),
+        CigarOp::Skip(_) => (skip_style(theme), '─'),
+        CigarOp::SoftClip(_) => (skip_style(theme), '.'),
     }
 }
 
 // ─── Style helpers ────────────────────────────────────────────────────────────
 
-fn insertion_marker_style() -> Style {
+fn insertion_marker_style(theme: Theme) -> Style {
     Style::default()
-        .fg(Color::Black)
-        .bg(Color::Magenta)
+        .fg(theme.insertion_marker_fg())
+        .bg(theme.insertion_marker_bg())
         .add_modifier(Modifier::BOLD | Modifier::REVERSED | Modifier::UNDERLINED)
 }
 
-fn insertion_base_style(base: u8) -> Style {
+fn insertion_base_style(base: u8, theme: Theme) -> Style {
     Style::default()
-        .fg(base_color(base))
+        .fg(base_color(base, theme))
         .bg(Color::Reset)
         .add_modifier(Modifier::BOLD)
 }
 
-fn insertion_box_style() -> Style {
+fn insertion_box_style(theme: Theme) -> Style {
     Style::default()
-        .fg(Color::Magenta)
+        .fg(theme.insertion_marker_bg())
         .add_modifier(Modifier::BOLD)
 }
 
@@ -481,20 +490,22 @@ fn methylation_call_at(
         .map(|call| &call.call)
 }
 
-fn methylation_base_style(style: Style, probability: Option<u8>) -> Style {
+fn methylation_base_style(style: Style, probability: Option<u8>, theme: Theme) -> Style {
     match probability {
         Some(probability) if probability >= 192 => style
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(theme.methylation_high_fg())
+            .bg(theme.methylation_high_bg())
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        Some(probability) if probability >= 128 => {
-            style.bg(Color::Cyan).add_modifier(Modifier::UNDERLINED)
-        }
-        Some(_) => style
-            .fg(Color::White)
-            .bg(Color::DarkGray)
+        Some(probability) if probability >= 128 => style
+            .bg(theme.methylation_mid_bg())
             .add_modifier(Modifier::UNDERLINED),
-        None => style.fg(Color::Cyan).add_modifier(Modifier::UNDERLINED),
+        Some(_) => style
+            .fg(theme.methylation_low_fg())
+            .bg(theme.methylation_low_bg())
+            .add_modifier(Modifier::UNDERLINED),
+        None => style
+            .fg(theme.methylation_high_bg())
+            .add_modifier(Modifier::UNDERLINED),
     }
 }
 
@@ -505,11 +516,12 @@ fn aligned_base_style(
     is_mismatch_op: bool,
     mapq: u8,
     dim: bool,
+    theme: Theme,
 ) -> Style {
     if is_mismatch_op || ref_base.is_some_and(|ref_base| bases_mismatch(base, ref_base)) {
-        mismatch_style(base)
+        mismatch_style(base, theme)
     } else {
-        match_style(base, mapq, dim)
+        match_style(base, mapq, dim, theme)
     }
 }
 
@@ -522,8 +534,8 @@ fn bases_mismatch(base: u8, ref_base: u8) -> bool {
 }
 
 /// Style for a matched base: color by nucleotide identity, dim if low mapq.
-fn match_style(base: u8, mapq: u8, dim: bool) -> Style {
-    let fg = base_color(base);
+fn match_style(base: u8, mapq: u8, dim: bool, theme: Theme) -> Style {
+    let fg = base_color(base, theme);
     // Background hint based on mapq so you can tell low-quality reads apart
     let bg = if mapq < 10 {
         Color::Reset
@@ -538,20 +550,20 @@ fn match_style(base: u8, mapq: u8, dim: bool) -> Style {
 }
 
 /// Style for a CIGAR-X mismatch: bright, base-colored background.
-fn mismatch_style(base: u8) -> Style {
+fn mismatch_style(base: u8, theme: Theme) -> Style {
     Style::default()
-        .fg(Color::Black)
-        .bg(base_color(base))
+        .fg(theme.mismatch_fg())
+        .bg(base_color(base, theme))
         .add_modifier(Modifier::BOLD)
 }
 
-fn mapq_style(mapq: u8, dim: bool) -> Style {
+fn mapq_style(mapq: u8, dim: bool, theme: Theme) -> Style {
     let color = if mapq >= 60 {
-        Color::White
+        theme.chrome_fg()
     } else if mapq >= 30 {
-        Color::Gray
+        theme.low_contrast_fg()
     } else {
-        Color::DarkGray
+        theme.subtle_fg()
     };
     let mut s = Style::default().fg(color);
     if dim {
@@ -561,14 +573,16 @@ fn mapq_style(mapq: u8, dim: bool) -> Style {
 }
 
 /// Standard IGV-inspired nucleotide colors.
-fn base_color(base: u8) -> Color {
-    match base.to_ascii_uppercase() {
-        b'A' => Color::Green,
-        b'T' => Color::Red,
-        b'G' => Color::Yellow,
-        b'C' => Color::Blue,
-        _ => Color::DarkGray,
-    }
+fn deletion_style(theme: Theme) -> Style {
+    Style::default().fg(theme.chrome_fg()).bg(theme.subtle_fg())
+}
+
+fn skip_style(theme: Theme) -> Style {
+    Style::default().fg(theme.subtle_fg())
+}
+
+fn base_color(base: u8, theme: Theme) -> Color {
+    theme.base_color(base)
 }
 
 fn strand_char(strand: Strand) -> char {
@@ -593,12 +607,27 @@ mod tests {
 
     #[test]
     fn reference_difference_uses_mismatch_style() {
-        let style = aligned_base_style(b'A', Some(b'C'), false, 60, false);
+        let style = aligned_base_style(b'A', Some(b'C'), false, 60, false, Theme::Dark);
         assert_eq!(style.bg, Some(Color::Green));
 
-        let style = aligned_base_style(b'A', Some(b'A'), false, 60, false);
+        let style = aligned_base_style(b'A', Some(b'A'), false, 60, false, Theme::Dark);
         assert_eq!(style.bg, Some(Color::Reset));
         assert_eq!(style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn light_theme_uses_readable_base_and_methylation_colors() {
+        let base_style = aligned_base_style(b'G', Some(b'G'), false, 60, false, Theme::Light);
+        assert_eq!(base_style.fg, Some(Color::Rgb(132, 89, 0)));
+
+        let methylated = methylation_base_style(base_style, Some(240), Theme::Light);
+        assert_eq!(methylated.fg, Some(Color::White));
+        assert_eq!(methylated.bg, Some(Color::Rgb(0, 102, 150)));
+        assert!(
+            methylated
+                .add_modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED)
+        );
     }
 
     #[test]
@@ -623,7 +652,17 @@ mod tests {
         }));
         let mut buf = Buffer::empty(area);
 
-        render_bases(&read, None, 0, area, &transform, true, false, &mut buf);
+        render_bases(
+            &read,
+            None,
+            0,
+            area,
+            &transform,
+            true,
+            false,
+            Theme::Dark,
+            &mut buf,
+        );
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
@@ -665,7 +704,17 @@ mod tests {
         let transform = ViewTransform::new(10, 25, 3);
         let mut buf = Buffer::empty(area);
 
-        render_bases(&read, None, 0, area, &transform, false, false, &mut buf);
+        render_bases(
+            &read,
+            None,
+            0,
+            area,
+            &transform,
+            false,
+            false,
+            Theme::Dark,
+            &mut buf,
+        );
 
         assert_eq!(buf[(0, 0)].symbol(), "I");
         assert_eq!(buf[(0, 0)].style().bg, Some(Color::Magenta));
@@ -754,7 +803,17 @@ mod tests {
         }));
         let mut buf = Buffer::empty(area);
 
-        render_bases(&read, None, 0, area, &transform, true, false, &mut buf);
+        render_bases(
+            &read,
+            None,
+            0,
+            area,
+            &transform,
+            true,
+            false,
+            Theme::Dark,
+            &mut buf,
+        );
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
@@ -800,7 +859,17 @@ mod tests {
         }));
         let mut buf = Buffer::empty(area);
 
-        render_bases(&read, None, 0, area, &transform, true, false, &mut buf);
+        render_bases(
+            &read,
+            None,
+            0,
+            area,
+            &transform,
+            true,
+            false,
+            Theme::Dark,
+            &mut buf,
+        );
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
@@ -831,7 +900,17 @@ mod tests {
         let transform = ViewTransform::new(10, 18, 8);
         let mut buf = Buffer::empty(area);
 
-        render_bases(&read, None, 0, area, &transform, false, false, &mut buf);
+        render_bases(
+            &read,
+            None,
+            0,
+            area,
+            &transform,
+            false,
+            false,
+            Theme::Dark,
+            &mut buf,
+        );
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
@@ -865,7 +944,17 @@ mod tests {
         let transform = ViewTransform::new(10, 14, 4);
         let mut buf = Buffer::empty(area);
 
-        render_bases(&read, None, 0, area, &transform, false, true, &mut buf);
+        render_bases(
+            &read,
+            None,
+            0,
+            area,
+            &transform,
+            false,
+            true,
+            Theme::Dark,
+            &mut buf,
+        );
 
         assert_eq!(buf[(1, 0)].symbol(), "C");
         assert_eq!(buf[(1, 0)].style().fg, Some(Color::Black));
@@ -906,7 +995,17 @@ mod tests {
         }));
         let mut buf = Buffer::empty(area);
 
-        render_bases(&read, None, 0, area, &transform, true, true, &mut buf);
+        render_bases(
+            &read,
+            None,
+            0,
+            area,
+            &transform,
+            true,
+            true,
+            Theme::Dark,
+            &mut buf,
+        );
 
         assert_eq!(buf[(5, 0)].symbol(), "T");
         assert_eq!(buf[(5, 0)].style().fg, Some(Color::White));

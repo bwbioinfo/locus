@@ -10,6 +10,7 @@ mod reference;
 mod region;
 mod render;
 mod screenshot;
+mod theme;
 mod ui;
 
 use anyhow::{Context, Result};
@@ -27,6 +28,7 @@ use cli::{Args, Command};
 use gff::{GffStore, prepare_indexed_annotation};
 use reference::ReferenceStore;
 use region::parse_region;
+use theme::Theme;
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -72,7 +74,12 @@ fn main() -> Result<()> {
         None
     };
 
-    let mut app = App::new(source, gff, reference, initial_region)?;
+    let theme = if args.light {
+        Theme::Light
+    } else {
+        Theme::Dark
+    };
+    let mut app = App::new(source, gff, reference, initial_region, theme)?;
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
