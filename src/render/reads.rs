@@ -5,7 +5,7 @@ use ratatui::{
     widgets::Widget,
 };
 
-use crate::cache::{CigarOp, PileupRow, RenderRead, Strand};
+use crate::cache::{AlignedModifiedBaseCall, CigarOp, PileupRow, RenderRead, Strand};
 use crate::reference::ReferenceSlice;
 
 use super::{InsertionGap, ViewTransform};
@@ -29,6 +29,7 @@ pub struct ReadsTrack<'a> {
     #[allow(dead_code)]
     pub show_names: bool,
     pub expand_insertions: bool,
+    pub show_methylation: bool,
 }
 
 impl<'a> Widget for ReadsTrack<'a> {
@@ -57,6 +58,7 @@ impl<'a> Widget for ReadsTrack<'a> {
                         area,
                         &self.transform,
                         self.expand_insertions,
+                        self.show_methylation,
                         buf,
                     );
                 } else {
@@ -128,12 +130,18 @@ fn render_bases(
     area: Rect,
     transform: &ViewTransform,
     expand_insertions: bool,
+    show_methylation: bool,
     buf: &mut Buffer,
 ) {
     let mut read_pos: usize = 0;
     let mut ref_pos: u64 = read.start;
     let mut insertions = Vec::new();
     let dim = read.is_secondary || read.is_supplementary;
+    let methylation_calls = if show_methylation {
+        read.aligned_methylation()
+    } else {
+        Vec::new()
+    };
 
     for &op in &read.cigar_ops {
         match op {
@@ -147,7 +155,11 @@ fn render_bases(
                 for _ in 0..n {
                     let base = read.sequence.get(read_pos).copied().unwrap_or(b'N');
                     let ref_base = reference.and_then(|reference| reference.base_at(ref_pos));
-                    let style = aligned_base_style(base, ref_base, is_mismatch_op, read.mapq, dim);
+                    let mut style =
+                        aligned_base_style(base, ref_base, is_mismatch_op, read.mapq, dim);
+                    if let Some(call) = methylation_call_at(&methylation_calls, read_pos, ref_pos) {
+                        style = methylation_base_style(style, call.probability);
+                    }
                     draw_at_ref_pos(ref_pos, y, base as char, style, area, transform, buf);
                     read_pos += 1;
                     ref_pos += 1;
@@ -458,6 +470,34 @@ fn insertion_boundary_style(style: Style) -> Style {
     style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
 }
 
+fn methylation_call_at(
+    calls: &[AlignedModifiedBaseCall],
+    read_pos: usize,
+    ref_pos: u64,
+) -> Option<&crate::cache::ModifiedBaseCall> {
+    calls
+        .iter()
+        .find(|call| call.call.read_pos == read_pos && call.ref_pos == Some(ref_pos))
+        .map(|call| &call.call)
+}
+
+fn methylation_base_style(style: Style, probability: Option<u8>) -> Style {
+    match probability {
+        Some(probability) if probability >= 192 => style
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        Some(probability) if probability >= 128 => {
+            style.bg(Color::Cyan).add_modifier(Modifier::UNDERLINED)
+        }
+        Some(_) => style
+            .fg(Color::White)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::UNDERLINED),
+        None => style.fg(Color::Cyan).add_modifier(Modifier::UNDERLINED),
+    }
+}
+
 /// Style for a matched base: color by nucleotide identity, dim if low mapq.
 fn aligned_base_style(
     base: u8,
@@ -541,6 +581,7 @@ fn strand_char(strand: Strand) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::{ModificationStrand, ModifiedBaseCall};
 
     #[test]
     fn bases_mismatch_only_for_canonical_base_differences() {
@@ -570,6 +611,7 @@ mod tests {
             mapq: 60,
             cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(1), CigarOp::Match(2)],
             sequence: b"ACGTA".to_vec(),
+            methylation: Vec::new(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -581,7 +623,7 @@ mod tests {
         }));
         let mut buf = Buffer::empty(area);
 
-        render_bases(&read, None, 0, area, &transform, true, &mut buf);
+        render_bases(&read, None, 0, area, &transform, true, false, &mut buf);
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
@@ -614,6 +656,7 @@ mod tests {
             mapq: 60,
             cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(2), CigarOp::Match(1)],
             sequence: b"ACGGG".to_vec(),
+            methylation: Vec::new(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -622,7 +665,7 @@ mod tests {
         let transform = ViewTransform::new(10, 25, 3);
         let mut buf = Buffer::empty(area);
 
-        render_bases(&read, None, 0, area, &transform, false, &mut buf);
+        render_bases(&read, None, 0, area, &transform, false, false, &mut buf);
 
         assert_eq!(buf[(0, 0)].symbol(), "I");
         assert_eq!(buf[(0, 0)].style().bg, Some(Color::Magenta));
@@ -638,6 +681,7 @@ mod tests {
             mapq: 60,
             cigar_ops: vec![CigarOp::Match(4), CigarOp::Insertion(1), CigarOp::Match(1)],
             sequence: b"ACGTTA".to_vec(),
+            methylation: Vec::new(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -656,6 +700,7 @@ mod tests {
                 CigarOp::Match(1),
             ],
             sequence: b"ACGGTTAAAA".to_vec(),
+            methylation: Vec::new(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -697,6 +742,7 @@ mod tests {
                 CigarOp::Match(1),
             ],
             sequence: b"ACGTGA".to_vec(),
+            methylation: Vec::new(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -708,7 +754,7 @@ mod tests {
         }));
         let mut buf = Buffer::empty(area);
 
-        render_bases(&read, None, 0, area, &transform, true, &mut buf);
+        render_bases(&read, None, 0, area, &transform, true, false, &mut buf);
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
@@ -742,6 +788,7 @@ mod tests {
             mapq: 60,
             cigar_ops: vec![CigarOp::Match(4)],
             sequence: b"ACGT".to_vec(),
+            methylation: Vec::new(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -753,7 +800,7 @@ mod tests {
         }));
         let mut buf = Buffer::empty(area);
 
-        render_bases(&read, None, 0, area, &transform, true, &mut buf);
+        render_bases(&read, None, 0, area, &transform, true, false, &mut buf);
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
@@ -775,6 +822,7 @@ mod tests {
             mapq: 60,
             cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(2), CigarOp::Match(1)],
             sequence: b"ACGGG".to_vec(),
+            methylation: Vec::new(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -783,12 +831,91 @@ mod tests {
         let transform = ViewTransform::new(10, 18, 8);
         let mut buf = Buffer::empty(area);
 
-        render_bases(&read, None, 0, area, &transform, false, &mut buf);
+        render_bases(&read, None, 0, area, &transform, false, false, &mut buf);
 
         assert_eq!(buf[(0, 0)].symbol(), "A");
         assert_eq!(buf[(1, 0)].symbol(), "C");
         assert_eq!(buf[(2, 0)].symbol(), "I");
         assert_eq!(buf[(2, 0)].style().bg, Some(Color::Magenta));
         assert_ne!(buf[(3, 0)].symbol(), "G");
+    }
+
+    #[test]
+    fn high_confidence_methylation_styles_aligned_base() {
+        let read = RenderRead {
+            name: "methylated-read".to_string(),
+            start: 10,
+            end: 14,
+            strand: Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![CigarOp::Match(4)],
+            sequence: b"ACGT".to_vec(),
+            methylation: vec![ModifiedBaseCall {
+                read_pos: 1,
+                canonical_base: b'C',
+                strand: ModificationStrand::Forward,
+                modification: "m".to_string(),
+                probability: Some(240),
+            }],
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        };
+        let area = Rect::new(0, 0, 4, 1);
+        let transform = ViewTransform::new(10, 14, 4);
+        let mut buf = Buffer::empty(area);
+
+        render_bases(&read, None, 0, area, &transform, false, true, &mut buf);
+
+        assert_eq!(buf[(1, 0)].symbol(), "C");
+        assert_eq!(buf[(1, 0)].style().fg, Some(Color::Black));
+        assert_eq!(buf[(1, 0)].style().bg, Some(Color::Cyan));
+        assert!(
+            buf[(1, 0)]
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED)
+        );
+    }
+
+    #[test]
+    fn low_confidence_methylation_styles_base_with_expanded_insertions() {
+        let read = RenderRead {
+            name: "low-methylated-read".to_string(),
+            start: 10,
+            end: 14,
+            strand: Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(1), CigarOp::Match(2)],
+            sequence: b"ACGTA".to_vec(),
+            methylation: vec![ModifiedBaseCall {
+                read_pos: 3,
+                canonical_base: b'T',
+                strand: ModificationStrand::Forward,
+                modification: "m".to_string(),
+                probability: Some(40),
+            }],
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        };
+        let area = Rect::new(0, 0, 8, 1);
+        let transform = ViewTransform::new(10, 18, 8).with_insertion_gap(Some(InsertionGap {
+            ref_pos: 12,
+            len: 1,
+        }));
+        let mut buf = Buffer::empty(area);
+
+        render_bases(&read, None, 0, area, &transform, true, true, &mut buf);
+
+        assert_eq!(buf[(5, 0)].symbol(), "T");
+        assert_eq!(buf[(5, 0)].style().fg, Some(Color::White));
+        assert_eq!(buf[(5, 0)].style().bg, Some(Color::DarkGray));
+        assert!(
+            buf[(5, 0)]
+                .style()
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
+        );
     }
 }

@@ -47,6 +47,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Up => app.zoom_in(),
         KeyCode::Char('-') | KeyCode::Down => app.zoom_out(),
         KeyCode::Char('i') => app.toggle_insertions(),
+        KeyCode::Char('m') => app.toggle_methylation(),
         KeyCode::Tab => app.cycle_insertion_expansion(true),
         KeyCode::BackTab => app.cycle_insertion_expansion(false),
 

@@ -55,6 +55,7 @@ pub struct App {
     pub terminal_rows: u16,
     pub expand_insertions: bool,
     pub selected_insertion_ref_pos: Option<u64>,
+    pub show_methylation: bool,
 
     /// Set to true to request a clean exit
     pub should_quit: bool,
@@ -114,6 +115,7 @@ impl App {
             terminal_rows: 24,
             expand_insertions: false,
             selected_insertion_ref_pos: None,
+            show_methylation: false,
             should_quit: false,
             needs_fetch: true,
             feature_matches: Vec::new(),
@@ -163,6 +165,15 @@ impl App {
             "insertions expanded".to_string()
         } else {
             "insertions collapsed".to_string()
+        });
+    }
+
+    pub fn toggle_methylation(&mut self) {
+        self.show_methylation = !self.show_methylation;
+        self.status_msg = Some(if self.show_methylation {
+            "methylation shown".to_string()
+        } else {
+            "methylation hidden".to_string()
         });
     }
 

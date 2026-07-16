@@ -5,6 +5,7 @@ mod cli;
 mod error;
 mod events;
 mod gff;
+mod methylation;
 mod reference;
 mod region;
 mod render;

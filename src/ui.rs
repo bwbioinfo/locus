@@ -60,14 +60,11 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         app.current_contig(),
         format_region_display(app),
     );
-    let insertion_mode = if app.expand_insertions {
-        "ins:expanded"
-    } else {
-        "ins:collapsed"
-    };
+    let insertion_mode = insertion_mode_label(app.expand_insertions);
+    let methylation_mode = methylation_mode_label(app.show_methylation);
     let metrics = format!(
-        " scale:{:.1} bp/col  reads:{}  {} ",
-        bp_per_col, read_count, insertion_mode
+        " scale:{:.1} bp/col  reads:{}  {}  {} ",
+        bp_per_col, read_count, insertion_mode, methylation_mode
     );
     let mut status = app.status_msg.as_ref().map(|msg| format!(" status:{msg} "));
 
@@ -107,6 +104,18 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::DarkGray)),
         area,
     );
+}
+
+fn insertion_mode_label(expanded: bool) -> &'static str {
+    if expanded {
+        "ins:expanded"
+    } else {
+        "ins:collapsed"
+    }
+}
+
+fn methylation_mode_label(shown: bool) -> &'static str {
+    if shown { "meth:on" } else { "meth:off" }
 }
 
 fn truncate_to_width(text: &str, width: usize) -> String {
@@ -213,6 +222,7 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
             transform,
             show_names,
             expand_insertions: app.expand_insertions,
+            show_methylation: app.show_methylation,
         },
         chunks[chunk_idx],
     );
@@ -237,9 +247,9 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
     let keys = match app.mode {
         Mode::Normal => {
             if app.gff.is_some() {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
             } else {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
             }
         }
         Mode::GoTo => " Enter:confirm  Esc:cancel",
@@ -403,6 +413,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from("  ↑ / + / =  Zoom in"),
         Line::from("  ↓ / -      Zoom out"),
         Line::from("  i          Toggle expanded insertion sequence"),
+        Line::from("  m          Toggle read methylation"),
         Line::from("  Tab        Move to next expanded insertion"),
         Line::from("  Shift+Tab  Move to previous expanded insertion"),
         Line::from("  g          Go to region  (e.g. chr1:1000-2000)"),
@@ -462,5 +473,17 @@ mod tests {
         assert_eq!(truncate_to_width("abcdef", 1), "~");
         assert_eq!(truncate_to_width("abcdef", 4), "abc~");
         assert_eq!(truncate_to_width("abc", 4), "abc");
+    }
+
+    #[test]
+    fn methylation_mode_label_reflects_toggle_state() {
+        assert_eq!(methylation_mode_label(false), "meth:off");
+        assert_eq!(methylation_mode_label(true), "meth:on");
+    }
+
+    #[test]
+    fn insertion_mode_label_reflects_toggle_state() {
+        assert_eq!(insertion_mode_label(false), "ins:collapsed");
+        assert_eq!(insertion_mode_label(true), "ins:expanded");
     }
 }

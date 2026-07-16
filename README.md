@@ -49,6 +49,9 @@ Reference FASTA files use a `.fai` index when present; plain or gzip-compressed 
 | `L` | Pan right (large step) |
 | `+` / `=` | Zoom in |
 | `-` | Zoom out |
+| `i` | Toggle expanded insertion sequence |
+| `m` | Toggle read methylation display |
+| `Tab` / `Shift+Tab` | Move to next / previous expanded insertion |
 | `g` | Go to region (e.g. `chr1:100000-200000`) |
 | `c` | Contig selector |
 | `r` | Refresh current region |
@@ -90,6 +93,11 @@ CIGAR operations:
 - `~` — skip / intron (N)
 - `S` — soft clip
 
+Methylation display:
+- Press `m` to show or hide modified-base calls parsed from SAM/BAM `MM` tags.
+- `ML` probabilities are used when present: high-confidence modified calls are highlighted more strongly, low-confidence calls use a dimmer treatment, and calls without `ML` are underlined.
+- Calls are rendered on aligned read bases after CIGAR mapping; soft-clipped or inserted bases are parsed but not drawn as reference-aligned methylation marks.
+
 Feature track:
 - `─>─` / `─<─` — transcript or gene backbone, including intronic span
 - `█` — exon
@@ -108,6 +116,7 @@ src/
 ├── region.rs        Region type, region string parser
 ├── events.rs        Keyboard event dispatch
 ├── gff.rs           GFF3/GTF feature loading, parsing, and search
+├── methylation.rs   MM/ML modified-base tag parsing
 ├── screenshot.rs    ANSI text and HTML screenshot export
 ├── ui.rs            ratatui frame drawing (top bar, overlays)
 ├── error.rs         LocusError enum
@@ -132,5 +141,5 @@ trait Track {
 
 ## Non-goals (first pass)
 
-CRAM, VCF, BED tracks, split-read/SV visualization, methylation,
-mouse interaction, remote files, multi-sample browsing.
+CRAM, VCF, BED tracks, split-read/SV visualization, mouse interaction,
+remote files, multi-sample browsing.
