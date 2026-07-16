@@ -42,6 +42,34 @@ Annotation files can be GFF3 or GTF, plain text or gzip/BGZF-compressed.
 If a BGZF-compressed annotation has a `.tbi` sidecar, visible feature rendering uses indexed region queries.
 Reference FASTA files use a `.fai` index when present; plain or gzip-compressed FASTA can also be loaded directly.
 
+## Demo Dataset
+
+A tiny synthetic dataset is included under [`examples/demo/`](examples/demo/). It contains a reference FASTA, source GFF, source SAM, a sorted/indexed BAM, and a prepared BGZF+tabix annotation file.
+
+```bash
+cargo run -- examples/demo/demo.sorted.bam \
+  --region chrDemo:45-115 \
+  --reference examples/demo/demo.fa \
+  --gff examples/demo/demo.sorted.gff.gz
+```
+
+The demo region includes:
+- a read insertion that can be expanded with `i` then `Tab`
+- a deletion rendered as `--`
+- MM/ML methylation calls shown with `m`
+- a feature track loaded from a tabix-indexed GFF
+- an app-generated screenshot captured with `s`
+
+![Locus demo showing expanded insertion, methylation, and feature tracks](docs/images/demo-expanded-methylation.png)
+
+The committed image was rendered from the app-generated HTML screenshot in [`docs/captures/demo-expanded-methylation.html`](docs/captures/demo-expanded-methylation.html). To rebuild the demo data, run:
+
+```bash
+examples/demo/build.sh
+```
+
+To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capture.sh`.
+
 ## Keybindings
 
 | Key | Action |
@@ -97,16 +125,22 @@ CIGAR operations:
 - `~` — skip / intron (N)
 - `S` — soft clip
 
+In the demo screenshot, the `read_ins_meth` insertion is expanded as `[GGGG]`, while the `read_del` deletion is visible as `--`.
+
 Methylation display:
 - Press `m` to show or hide modified-base calls parsed from SAM/BAM `MM` tags.
 - `ML` probabilities are used when present: high-confidence modified calls are highlighted more strongly, low-confidence calls use a dimmer treatment, and calls without `ML` are underlined.
 - Calls are rendered on aligned read bases after CIGAR mapping; soft-clipped or inserted bases are parsed but not drawn as reference-aligned methylation marks.
+
+The demo BAM includes forward and reverse-strand MM/ML calls so the `m` toggle visibly changes the read pileup.
 
 Feature track:
 - `─>─` / `─<─` — transcript or gene backbone, including intronic span
 - `█` — exon
 - `▓` — CDS
 - `▒` — UTR
+
+The demo GFF is intentionally unsorted in source form; `examples/demo/build.sh` uses `locus prepare-annotations` to create the sorted BGZF file and `.tbi` index used by the screenshot.
 
 ## Architecture
 
