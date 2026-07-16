@@ -191,7 +191,7 @@ fn pack_reads(indices: &[usize], reads: &[RenderRead], max_rows: usize) -> Vec<P
         // Find first row where this read doesn't overlap (with 1-col gap for readability)
         let target_row = row_ends
             .iter()
-            .position(|&end| read.start >= end + 1)
+            .position(|&end| read.start > end)
             .unwrap_or(row_ends.len());
 
         if target_row >= max_rows {
@@ -231,8 +231,8 @@ fn bin_coverage(reads: &[RenderRead], visible: &Region, cols: usize) -> Vec<u32>
         let col_start = ((r_start - visible.start) as f64 / bp_per_col) as usize;
         let col_end = ((r_end - visible.start) as f64 / bp_per_col).ceil() as usize;
         let col_end = col_end.min(cols);
-        for c in col_start..col_end {
-            bins[c] = bins[c].saturating_add(1);
+        for bin in bins.iter_mut().take(col_end).skip(col_start) {
+            *bin = bin.saturating_add(1);
         }
     }
     bins

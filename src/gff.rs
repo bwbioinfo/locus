@@ -206,10 +206,10 @@ impl GffStore {
 
     /// Return features overlapping [start, end) on the given contig.
     pub fn features_in_region(&self, contig: &str, start: u64, end: u64) -> Vec<GffFeature> {
-        if let Some(path) = self.indexed_path.as_deref() {
-            if let Ok(features) = query_indexed_features(path, contig, start, end) {
-                return features;
-            }
+        if let Some(path) = self.indexed_path.as_deref()
+            && let Ok(features) = query_indexed_features(path, contig, start, end)
+        {
+            return features;
         }
 
         self.features_in_region_linear(contig, start, end)
@@ -480,12 +480,13 @@ fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push(char::from(h << 4 | l));
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+        {
+            out.push(char::from(h << 4 | l));
+            i += 3;
+            continue;
         }
         out.push(bytes[i] as char);
         i += 1;

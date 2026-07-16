@@ -110,11 +110,11 @@ fn main() -> Result<()> {
 
 fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
     loop {
-        if app.needs_fetch {
-            if let Err(e) = app.refresh() {
-                app.status_msg = Some(format!("{e}"));
-                app.needs_fetch = false;
-            }
+        if app.needs_fetch
+            && let Err(e) = app.refresh()
+        {
+            app.status_msg = Some(format!("{e}"));
+            app.needs_fetch = false;
         }
 
         terminal.draw(|frame| ui::draw(frame, app))?;
