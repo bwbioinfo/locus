@@ -32,10 +32,14 @@ locus sample.bam --reference hg38.fa
 
 # With annotations for feature rendering and gene search
 locus sample.bam --gff hg38.ncbiRefSeq.gtf.gz
+
+# Prepare a sorted, BGZF-compressed, tabix-indexed annotation file
+locus prepare-annotations hg38.ncbiRefSeq.gtf --output hg38.ncbiRefSeq.sorted.gtf.gz
 ```
 
 The BAM must be coordinate-sorted and indexed (`.bai` file beside it).
 Annotation files can be GFF3 or GTF, plain text or gzip/BGZF-compressed.
+If a BGZF-compressed annotation has a `.tbi` sidecar, visible feature rendering uses indexed region queries.
 Reference FASTA files use a `.fai` index when present; plain or gzip-compressed FASTA can also be loaded directly.
 
 ## Keybindings

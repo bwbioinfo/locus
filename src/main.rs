@@ -23,15 +23,34 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use app::App;
 use bam::BamSource;
-use cli::Args;
-use gff::GffStore;
+use cli::{Args, Command};
+use gff::{GffStore, prepare_indexed_annotation};
 use reference::ReferenceStore;
 use region::parse_region;
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let source = BamSource::open(&args.bam).with_context(|| format!("opening {}", args.bam))?;
+    if let Some(command) = args.command {
+        return match command {
+            Command::PrepareAnnotations { input, output } => {
+                let prepared = prepare_indexed_annotation(&input, &output)?;
+                println!(
+                    "prepared {} records: {} + {}",
+                    prepared.record_count,
+                    prepared.output_path.display(),
+                    prepared.index_path.display()
+                );
+                Ok(())
+            }
+        };
+    }
+
+    let Some(bam) = args.bam.as_ref() else {
+        anyhow::bail!("missing BAM path");
+    };
+
+    let source = BamSource::open(bam).with_context(|| format!("opening {bam}"))?;
 
     let initial_region = if let Some(ref r) = args.region {
         let parsed = parse_region(r)?;
