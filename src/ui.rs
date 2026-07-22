@@ -66,11 +66,18 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     );
     let insertion_mode = insertion_mode_label(app.expand_insertions);
     let methylation_mode = methylation_mode_label(app.show_methylation);
+    let phasing_mode = phasing_mode_label(app.show_phasing);
     let theme_mode = theme_mode_label(app.theme);
     let mapq_filter = mapq_filter_label(app.min_mapq);
     let metrics = format!(
-        " reads:{}  {}  scale:{:.1} bp/col  {}  {}  {} ",
-        read_count, mapq_filter, bp_per_col, insertion_mode, methylation_mode, theme_mode
+        " reads:{}  {}  {}  scale:{:.1} bp/col  {}  {}  {} ",
+        read_count,
+        mapq_filter,
+        phasing_mode,
+        bp_per_col,
+        insertion_mode,
+        methylation_mode,
+        theme_mode
     );
     let status = app.status_msg.as_ref().map(|msg| format!(" status:{msg} "));
     let (identity, metrics, status) = fit_top_bar(&identity, &metrics, status.as_deref(), width);
@@ -112,6 +119,10 @@ fn insertion_mode_label(expanded: bool) -> &'static str {
 
 fn methylation_mode_label(shown: bool) -> &'static str {
     if shown { "meth:on" } else { "meth:off" }
+}
+
+fn phasing_mode_label(shown: bool) -> &'static str {
+    if shown { "phase:on" } else { "phase:off" }
 }
 
 fn theme_mode_label(theme: crate::theme::Theme) -> &'static str {
@@ -257,6 +268,7 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
             show_names,
             expand_insertions: app.expand_insertions,
             show_methylation: app.show_methylation,
+            show_phasing: app.show_phasing,
             theme: app.theme,
         },
         chunks[chunk_idx],
@@ -282,9 +294,9 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
     let keys = match app.mode {
         Mode::Normal => {
             if app.gff.is_some() {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  Q:MAPQ  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  p:phasing  Q:MAPQ  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
             } else {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  Q:MAPQ  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  p:phasing  Q:MAPQ  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
             }
         }
         Mode::GoTo => " Enter:confirm  Esc:cancel",
@@ -473,6 +485,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         Line::from("  ↓ / -      Zoom out"),
         Line::from("  i          Toggle expanded insertion sequence"),
         Line::from("  m          Toggle read methylation"),
+        Line::from("  p          Toggle phased-read colors"),
         Line::from("  Q          Set minimum read MAPQ (0 shows all)"),
         Line::from("  t          Toggle dark/light theme"),
         Line::from("  Tab        Move to next expanded insertion"),
@@ -493,7 +506,9 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         Line::from("    Esc      Close without jumping"),
         Line::from(""),
         Line::from("  Read colors:"),
-        Line::from("    Green   MAPQ ≥ 60  Yellow  MAPQ ≥ 10  Gray  MAPQ < 10"),
+        Line::from("    Phase off: MAPQ uses high / medium / low contrast"),
+        Line::from("    Phase on: HP1 cyan, HP2 magenta, unphased gray"),
+        Line::from("    MAPQ remains visible as bold / normal / dim intensity"),
         Line::from(
             "    Reference mismatches use base-colored bold backgrounds when --reference is loaded",
         ),
@@ -540,7 +555,8 @@ mod tests {
     #[test]
     fn top_bar_preserves_identity_and_mapq_at_terminal_width() {
         let identity = " LOCUS  file:demo.sorted.bam  region:chrDemo:1-154 ";
-        let metrics = " reads:3  mapq>=30  scale:2.0 bp/col  ins:collapsed  meth:off  theme:dark ";
+        let metrics =
+            " reads:3  mapq>=30  phase:on  scale:2.0 bp/col  ins:collapsed  meth:off  theme:dark ";
         let status = " status:minimum MAPQ set to 30 ";
 
         let (identity, metrics, status) = fit_top_bar(identity, metrics, Some(status), 80);
@@ -548,6 +564,7 @@ mod tests {
 
         assert!(identity.starts_with(" LOCUS"));
         assert!(metrics.contains("mapq>=30"));
+        assert!(metrics.contains("phase:on"));
         assert!(identity.len() + metrics.len() + status.len() <= 80);
     }
 
@@ -555,6 +572,12 @@ mod tests {
     fn methylation_mode_label_reflects_toggle_state() {
         assert_eq!(methylation_mode_label(false), "meth:off");
         assert_eq!(methylation_mode_label(true), "meth:on");
+    }
+
+    #[test]
+    fn phasing_mode_label_reflects_toggle_state() {
+        assert_eq!(phasing_mode_label(false), "phase:off");
+        assert_eq!(phasing_mode_label(true), "phase:on");
     }
 
     #[test]

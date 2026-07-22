@@ -31,6 +31,7 @@ pub struct ReadsTrack<'a> {
     pub show_names: bool,
     pub expand_insertions: bool,
     pub show_methylation: bool,
+    pub show_phasing: bool,
     pub theme: Theme,
 }
 
@@ -60,11 +61,20 @@ impl<'a> Widget for ReadsTrack<'a> {
                         transform: &self.transform,
                         expand_insertions: self.expand_insertions,
                         show_methylation: self.show_methylation,
+                        show_phasing: self.show_phasing,
                         theme: self.theme,
                     };
                     render_bases(read, context, buf);
                 } else {
-                    render_arrows(read, y, area, &self.transform, self.theme, buf);
+                    render_arrows(
+                        read,
+                        y,
+                        area,
+                        &self.transform,
+                        self.show_phasing,
+                        self.theme,
+                        buf,
+                    );
                 }
             }
         }
@@ -132,6 +142,16 @@ struct BaseRenderContext<'a> {
     transform: &'a ViewTransform,
     expand_insertions: bool,
     show_methylation: bool,
+    show_phasing: bool,
+    theme: Theme,
+}
+
+#[derive(Clone, Copy)]
+struct ReadStyleContext {
+    dim: bool,
+    mapq: u8,
+    haplotype: Option<u32>,
+    show_phasing: bool,
     theme: Theme,
 }
 
@@ -141,6 +161,13 @@ fn render_bases(read: &RenderRead, context: BaseRenderContext<'_>, buf: &mut Buf
     let mut ref_pos: u64 = read.start;
     let mut insertions = Vec::new();
     let dim = read.is_secondary || read.is_supplementary;
+    let read_style = ReadStyleContext {
+        dim,
+        mapq: read.mapq,
+        haplotype: read.phase.haplotype,
+        show_phasing: context.show_phasing,
+        theme: context.theme,
+    };
     let methylation_calls = if context.show_methylation {
         read.aligned_methylation()
     } else {
@@ -161,8 +188,7 @@ fn render_bases(read: &RenderRead, context: BaseRenderContext<'_>, buf: &mut Buf
                     let ref_base = context
                         .reference
                         .and_then(|reference| reference.base_at(ref_pos));
-                    let mut style =
-                        aligned_base_style(base, ref_base, is_mismatch_op, dim, context.theme);
+                    let mut style = aligned_base_style(base, ref_base, is_mismatch_op, read_style);
                     if let Some(call) = methylation_call_at(&methylation_calls, read_pos, ref_pos) {
                         style = methylation_base_style(style, call.probability, context.theme);
                     }
@@ -408,6 +434,7 @@ fn render_arrows(
     y: u16,
     area: Rect,
     transform: &ViewTransform,
+    show_phasing: bool,
     theme: Theme,
     buf: &mut Buffer,
 ) {
@@ -432,7 +459,7 @@ fn render_arrows(
         let ox_start = (area.x + oc_start).max(x_start);
         let ox_end = (area.x + oc_end).min(x_end);
 
-        let (style, ch) = arrow_op_style(&op, read, theme);
+        let (style, ch) = arrow_op_style(&op, read, show_phasing, theme);
         for x in ox_start..ox_end {
             if x < area.x + area.width
                 && let Some(cell) = buf.cell_mut((x, y))
@@ -458,19 +485,34 @@ fn render_arrows(
     }
 
     if read.cigar_ops.is_empty() && x_start < x_end {
-        let style = mapq_style(read.mapq, read.is_secondary || read.is_supplementary, theme);
+        let dim = read.is_secondary || read.is_supplementary;
+        let style = if show_phasing {
+            phase_read_style(read.phase.haplotype, read.mapq, dim, theme)
+        } else {
+            mapq_style(read.mapq, dim, theme)
+        };
         if let Some(cell) = buf.cell_mut((x_start, y)) {
             cell.set_char(strand_char(read.strand)).set_style(style);
         }
     }
 }
 
-fn arrow_op_style(op: &CigarOp, read: &RenderRead, theme: Theme) -> (Style, char) {
+fn arrow_op_style(
+    op: &CigarOp,
+    read: &RenderRead,
+    show_phasing: bool,
+    theme: Theme,
+) -> (Style, char) {
     match op {
-        CigarOp::Match(_) => (
-            mapq_style(read.mapq, read.is_secondary || read.is_supplementary, theme),
-            strand_char(read.strand),
-        ),
+        CigarOp::Match(_) => {
+            let dim = read.is_secondary || read.is_supplementary;
+            let style = if show_phasing {
+                phase_read_style(read.phase.haplotype, read.mapq, dim, theme)
+            } else {
+                mapq_style(read.mapq, dim, theme)
+            };
+            (style, strand_char(read.strand))
+        }
         CigarOp::Mismatch(_) => (
             Style::default()
                 .fg(theme.base_color(b'T'))
@@ -545,13 +587,23 @@ fn aligned_base_style(
     base: u8,
     ref_base: Option<u8>,
     is_mismatch_op: bool,
-    dim: bool,
-    theme: Theme,
+    context: ReadStyleContext,
 ) -> Style {
     if is_mismatch_op || ref_base.is_some_and(|ref_base| bases_mismatch(base, ref_base)) {
-        mismatch_style(base, theme)
+        mismatch_style(base, context.theme)
     } else {
-        match_style(base, dim, theme)
+        let style = match_style(base, context.dim, context.theme);
+        if context.show_phasing {
+            phase_base_style(
+                style,
+                context.haplotype,
+                context.mapq,
+                context.dim,
+                context.theme,
+            )
+        } else {
+            style
+        }
     }
 }
 
@@ -596,6 +648,42 @@ fn mapq_style(mapq: u8, dim: bool, theme: Theme) -> Style {
     s
 }
 
+fn phase_read_style(haplotype: Option<u32>, mapq: u8, dim: bool, theme: Theme) -> Style {
+    let color = match haplotype {
+        Some(1) => theme.phase_hp1_fg(),
+        Some(2) => theme.phase_hp2_fg(),
+        _ => theme.phase_unphased_fg(),
+    };
+    apply_phase_quality(Style::default().fg(color), mapq, dim)
+}
+
+fn phase_base_style(
+    mut style: Style,
+    haplotype: Option<u32>,
+    mapq: u8,
+    dim: bool,
+    theme: Theme,
+) -> Style {
+    style = match haplotype {
+        Some(1) => style.bg(theme.phase_hp1_bg()),
+        Some(2) => style.bg(theme.phase_hp2_bg()),
+        _ => style.bg(theme.phase_unphased_bg()),
+    };
+    apply_phase_quality(style, mapq, dim)
+}
+
+fn apply_phase_quality(mut style: Style, mapq: u8, dim: bool) -> Style {
+    if mapq >= 60 {
+        style = style.add_modifier(Modifier::BOLD);
+    } else if mapq < 30 {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    if dim {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    style
+}
+
 /// Standard IGV-inspired nucleotide colors.
 fn deletion_style(theme: Theme) -> Style {
     Style::default().fg(theme.chrome_fg()).bg(theme.subtle_fg())
@@ -619,7 +707,17 @@ fn strand_char(strand: Strand) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::{ModificationStrand, ModifiedBaseCall};
+    use crate::cache::{ModificationStrand, ModifiedBaseCall, ReadPhase};
+
+    fn read_style(theme: Theme) -> ReadStyleContext {
+        ReadStyleContext {
+            dim: false,
+            mapq: 60,
+            haplotype: None,
+            show_phasing: false,
+            theme,
+        }
+    }
 
     fn render_test_bases(
         read: &RenderRead,
@@ -639,6 +737,7 @@ mod tests {
                 transform,
                 expand_insertions,
                 show_methylation,
+                show_phasing: false,
                 theme,
             },
             buf,
@@ -655,17 +754,17 @@ mod tests {
 
     #[test]
     fn reference_difference_uses_mismatch_style() {
-        let style = aligned_base_style(b'A', Some(b'C'), false, false, Theme::Dark);
+        let style = aligned_base_style(b'A', Some(b'C'), false, read_style(Theme::Dark));
         assert_eq!(style.bg, Some(Color::Green));
 
-        let style = aligned_base_style(b'A', Some(b'A'), false, false, Theme::Dark);
+        let style = aligned_base_style(b'A', Some(b'A'), false, read_style(Theme::Dark));
         assert_eq!(style.bg, Some(Color::Reset));
         assert_eq!(style.fg, Some(Color::Green));
     }
 
     #[test]
     fn light_theme_uses_readable_base_and_methylation_colors() {
-        let base_style = aligned_base_style(b'G', Some(b'G'), false, false, Theme::Light);
+        let base_style = aligned_base_style(b'G', Some(b'G'), false, read_style(Theme::Light));
         assert_eq!(base_style.fg, Some(Color::Rgb(132, 89, 0)));
 
         let methylated = methylation_base_style(base_style, Some(240), Theme::Light);
@@ -679,6 +778,68 @@ mod tests {
     }
 
     #[test]
+    fn phase_styles_distinguish_hp1_hp2_and_unphased_in_both_themes() {
+        for theme in [Theme::Dark, Theme::Light] {
+            let hp1 = phase_read_style(Some(1), 45, false, theme);
+            let hp2 = phase_read_style(Some(2), 45, false, theme);
+            let unphased = phase_read_style(None, 45, false, theme);
+
+            assert_ne!(hp1.fg, hp2.fg);
+            assert_ne!(hp1.fg, unphased.fg);
+            assert_ne!(hp2.fg, unphased.fg);
+
+            let hp1_base = phase_base_style(Style::default(), Some(1), 45, false, theme);
+            let hp2_base = phase_base_style(Style::default(), Some(2), 45, false, theme);
+            let unphased_base = phase_base_style(Style::default(), None, 45, false, theme);
+            assert_ne!(hp1_base.bg, hp2_base.bg);
+            assert_ne!(hp1_base.bg, unphased_base.bg);
+            assert_ne!(hp2_base.bg, unphased_base.bg);
+        }
+    }
+
+    #[test]
+    fn phase_styles_preserve_mapq_intensity() {
+        let high = phase_read_style(Some(1), 60, false, Theme::Dark);
+        let medium = phase_read_style(Some(1), 30, false, Theme::Dark);
+        let low = phase_read_style(Some(1), 29, false, Theme::Dark);
+
+        assert!(high.add_modifier.contains(Modifier::BOLD));
+        assert!(!medium.add_modifier.contains(Modifier::BOLD));
+        assert!(!medium.add_modifier.contains(Modifier::DIM));
+        assert!(low.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn mismatch_and_methylation_styles_override_phase_backgrounds() {
+        let matched = aligned_base_style(
+            b'A',
+            Some(b'A'),
+            false,
+            ReadStyleContext {
+                haplotype: Some(1),
+                show_phasing: true,
+                ..read_style(Theme::Dark)
+            },
+        );
+        assert_eq!(matched.bg, Some(Theme::Dark.phase_hp1_bg()));
+
+        let mismatched = aligned_base_style(
+            b'A',
+            Some(b'C'),
+            false,
+            ReadStyleContext {
+                haplotype: Some(1),
+                show_phasing: true,
+                ..read_style(Theme::Dark)
+            },
+        );
+        assert_eq!(mismatched.bg, Some(Color::Green));
+
+        let methylated = methylation_base_style(matched, Some(240), Theme::Dark);
+        assert_eq!(methylated.bg, Some(Theme::Dark.methylation_high_bg()));
+    }
+
+    #[test]
     fn expanded_insertions_open_shared_gap_at_selected_locus() {
         let read = RenderRead {
             name: "read-with-ins".to_string(),
@@ -689,6 +850,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(1), CigarOp::Match(2)],
             sequence: b"ACGTA".to_vec(),
             methylation: Vec::new(),
+            phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -734,6 +896,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(2), CigarOp::Match(1)],
             sequence: b"ACGGG".to_vec(),
             methylation: Vec::new(),
+            phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -759,6 +922,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(4), CigarOp::Insertion(1), CigarOp::Match(1)],
             sequence: b"ACGTTA".to_vec(),
             methylation: Vec::new(),
+            phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -778,6 +942,7 @@ mod tests {
             ],
             sequence: b"ACGGTTAAAA".to_vec(),
             methylation: Vec::new(),
+            phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -820,6 +985,7 @@ mod tests {
             ],
             sequence: b"ACGTGA".to_vec(),
             methylation: Vec::new(),
+            phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -866,6 +1032,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(4)],
             sequence: b"ACGT".to_vec(),
             methylation: Vec::new(),
+            phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -900,6 +1067,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(2), CigarOp::Match(1)],
             sequence: b"ACGGG".to_vec(),
             methylation: Vec::new(),
+            phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -934,6 +1102,7 @@ mod tests {
                 modification: "m".to_string(),
                 probability: Some(240),
             }],
+            phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,
@@ -972,6 +1141,7 @@ mod tests {
                 modification: "m".to_string(),
                 probability: Some(40),
             }],
+            phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,

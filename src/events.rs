@@ -49,6 +49,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('-') | KeyCode::Down => app.zoom_out(),
         KeyCode::Char('i') => app.toggle_insertions(),
         KeyCode::Char('m') => app.toggle_methylation(),
+        KeyCode::Char('p') => app.toggle_phasing(),
         KeyCode::Char('t') => app.toggle_theme(),
         KeyCode::Char('Q') => app.begin_mapq_filter(),
         KeyCode::Tab => app.cycle_insertion_expansion(true),
@@ -189,4 +190,29 @@ fn handle_help(app: &mut App, key: KeyEvent) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::{bam::BamSource, theme::Theme};
+
+    #[test]
+    fn p_key_toggles_phasing_without_fetching() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.needs_fetch = false;
+
+        handle_normal(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        )
+        .expect("handle phase toggle");
+
+        assert!(app.show_phasing);
+        assert!(!app.needs_fetch);
+    }
 }

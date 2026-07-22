@@ -59,6 +59,7 @@ pub struct App {
     pub expand_insertions: bool,
     pub selected_insertion_ref_pos: Option<u64>,
     pub show_methylation: bool,
+    pub show_phasing: bool,
     pub theme: Theme,
     pub min_mapq: u8,
 
@@ -123,6 +124,7 @@ impl App {
             expand_insertions: false,
             selected_insertion_ref_pos: None,
             show_methylation: false,
+            show_phasing: false,
             theme,
             min_mapq,
             should_quit: false,
@@ -183,6 +185,15 @@ impl App {
             "methylation shown".to_string()
         } else {
             "methylation hidden".to_string()
+        });
+    }
+
+    pub fn toggle_phasing(&mut self) {
+        self.show_phasing = !self.show_phasing;
+        self.status_msg = Some(if self.show_phasing {
+            "phasing shown: HP1 cyan, HP2 magenta, unphased gray".to_string()
+        } else {
+            "phasing hidden".to_string()
         });
     }
 
@@ -570,6 +581,22 @@ mod tests {
         assert_eq!(
             app.status_msg.as_deref(),
             Some("minimum MAPQ must be between 0 and 255")
+        );
+    }
+
+    #[test]
+    fn phasing_is_off_by_default_and_toggles_without_refetching() {
+        let mut app = demo_app(0);
+        assert!(!app.show_phasing);
+        app.needs_fetch = false;
+
+        app.toggle_phasing();
+
+        assert!(app.show_phasing);
+        assert!(!app.needs_fetch);
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("phasing shown: HP1 cyan, HP2 magenta, unphased gray")
         );
     }
 }
