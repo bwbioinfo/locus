@@ -59,7 +59,7 @@ fn main() -> Result<()> {
         let resolved = source.resolve_region(&parsed)?;
         Some(resolved)
     } else {
-        None
+        source.first_mapped_region()?
     };
 
     let gff = if let Some(ref path) = args.gff {

@@ -23,6 +23,8 @@ pub struct ContigInfo {
     pub length: u64,
 }
 
+const DEFAULT_VIEW_SPAN: u64 = 1_000;
+
 /// BAM 4-bit base encoding: index = nibble value, value = ASCII base.
 const BAM_BASES: &[u8; 16] = b"=ACMGRSVTWYHKDBN";
 
@@ -108,6 +110,43 @@ impl BamSource {
         } else {
             Ok(region.clone())
         }
+    }
+
+    /// Return a default viewport centered on the first mapped alignment in file order.
+    pub fn first_mapped_region(&self) -> Result<Option<Region>> {
+        let mut reader = self.reader.borrow_mut();
+
+        for result in reader.records() {
+            let record = result.context("failed to read BAM while locating its first alignment")?;
+            if record.flags().is_unmapped() {
+                continue;
+            }
+
+            let Some(reference_sequence_id) = record
+                .reference_sequence_id()
+                .transpose()
+                .context("invalid reference sequence ID on first mapped alignment")?
+            else {
+                continue;
+            };
+            let Some(alignment_start) = record
+                .alignment_start()
+                .transpose()
+                .context("invalid position on first mapped alignment")?
+            else {
+                continue;
+            };
+            let contig = self.contigs.get(reference_sequence_id).with_context(|| {
+                format!(
+                    "first mapped alignment references unknown sequence ID {reference_sequence_id}"
+                )
+            })?;
+            let start_0based = (alignment_start.get() as u64).saturating_sub(1);
+
+            return Ok(Some(initial_region_for_alignment(contig, start_0based)));
+        }
+
+        Ok(None)
     }
 
     /// Fetch reads overlapping `region`, reusing the persistent reader (no file re-open).
@@ -237,4 +276,58 @@ fn parse_record_methylation(
         });
 
     parse_modified_bases(mm, ml.as_deref(), sequence)
+}
+
+fn initial_region_for_alignment(contig: &ContigInfo, alignment_start: u64) -> Region {
+    let span = DEFAULT_VIEW_SPAN.min(contig.length);
+    let start = alignment_start
+        .saturating_sub(span / 2)
+        .min(contig.length.saturating_sub(span));
+
+    Region::new(contig.name.clone(), start, start + span)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_region_centers_alignment_and_clamps_to_contig() {
+        let contig = ContigInfo {
+            name: "chr1".to_string(),
+            length: 1_000_000,
+        };
+
+        assert_eq!(
+            initial_region_for_alignment(&contig, 500_000),
+            Region::new("chr1", 499_500, 500_500)
+        );
+        assert_eq!(
+            initial_region_for_alignment(&contig, 100),
+            Region::new("chr1", 0, 1_000)
+        );
+        assert_eq!(
+            initial_region_for_alignment(&contig, 999_900),
+            Region::new("chr1", 999_000, 1_000_000)
+        );
+    }
+
+    #[test]
+    fn first_mapped_region_uses_first_demo_alignment_and_keeps_queries_working() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+
+        let region = source
+            .first_mapped_region()
+            .expect("locate first mapped alignment")
+            .expect("demo BAM has mapped alignments");
+
+        assert_eq!(region, Region::new("chrDemo", 0, 154));
+
+        let reads = source.fetch_reads(&region).expect("query initial region");
+        assert_eq!(
+            reads.first().map(|read| read.name.as_str()),
+            Some("read_ins_meth")
+        );
+    }
 }
