@@ -26,10 +26,12 @@ capture_demo() {
     sleep 0.3
     printf 'm'
     sleep 0.3
+    printf 'p'
+    sleep 0.3
     printf 's'
     sleep 0.8
     printf 'q'
-  ) | script -qfec "stty cols 110 rows 30; ./target/debug/locus examples/demo/demo.sorted.bam --region chrDemo:45-115 --reference examples/demo/demo.fa --gff examples/demo/demo.sorted.gff.gz $*" "/tmp/locus-demo-$label.typescript" >/dev/null
+  ) | script -qfec "stty cols 110 rows 20; ./target/debug/locus examples/demo/demo.sorted.bam --region chrDemo:45-115 --reference examples/demo/demo.fa --gff examples/demo/demo.sorted.gff.gz $*" "/tmp/locus-demo-$label.typescript" >/dev/null
 
   latest_html="$(comm -13 <(sort "$before") <(find screenshots -maxdepth 1 -name 'locus-*.html' -print | sort) | tail -n 1)"
   rm -f "$before"
@@ -45,7 +47,7 @@ capture_demo() {
 
   if command -v chromium >/dev/null 2>&1; then
     if ! chromium --headless --no-sandbox --disable-gpu --disable-crash-reporter \
-      --window-size=1500,700 \
+      --window-size=1100,430 \
       --screenshot="docs/images/demo-$label-expanded-methylation.png" \
       "file://$repo_root/docs/captures/demo-$label-expanded-methylation.html"; then
       echo "chromium failed; HTML and ANSI screenshots were updated, PNG was not regenerated for $label" >&2

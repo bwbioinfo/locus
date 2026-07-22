@@ -135,6 +135,48 @@ impl Theme {
         }
     }
 
+    pub fn phase_hp1_fg(self) -> Color {
+        match self {
+            Self::Dark => Color::Cyan,
+            Self::Light => Color::Rgb(0, 92, 128),
+        }
+    }
+
+    pub fn phase_hp2_fg(self) -> Color {
+        match self {
+            Self::Dark => Color::Magenta,
+            Self::Light => Color::Rgb(132, 0, 132),
+        }
+    }
+
+    pub fn phase_unphased_fg(self) -> Color {
+        match self {
+            Self::Dark => Color::Gray,
+            Self::Light => Color::Rgb(82, 82, 82),
+        }
+    }
+
+    pub fn phase_hp1_bg(self) -> Color {
+        match self {
+            Self::Dark => Color::Rgb(0, 48, 58),
+            Self::Light => Color::Rgb(210, 240, 245),
+        }
+    }
+
+    pub fn phase_hp2_bg(self) -> Color {
+        match self {
+            Self::Dark => Color::Rgb(62, 28, 62),
+            Self::Light => Color::Rgb(245, 218, 240),
+        }
+    }
+
+    pub fn phase_unphased_bg(self) -> Color {
+        match self {
+            Self::Dark => Color::Rgb(36, 36, 36),
+            Self::Light => Color::Rgb(232, 232, 232),
+        }
+    }
+
     pub fn feature_color(self, ty: &str) -> Color {
         match (self, ty) {
             (_, "gene" | "pseudogene") if self == Self::Dark => Color::Green,

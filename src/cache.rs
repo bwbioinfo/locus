@@ -51,6 +51,13 @@ pub struct AlignedModifiedBaseCall {
     pub ref_pos: Option<u64>,
 }
 
+/// Standard haplotagging metadata carried by HP and PS alignment tags.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadPhase {
+    pub haplotype: Option<u32>,
+    pub phase_set: Option<u32>,
+}
+
 /// Lightweight read representation for rendering.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -66,6 +73,7 @@ pub struct RenderRead {
     /// ASCII-decoded read sequence (A/C/G/T/N), read-coordinate indexed.
     pub sequence: Vec<u8>,
     pub methylation: Vec<ModifiedBaseCall>,
+    pub phase: ReadPhase,
     pub is_secondary: bool,
     pub is_supplementary: bool,
     pub is_duplicate: bool,
@@ -258,6 +266,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(end - start)],
             sequence: vec![b'A'; len],
             methylation: Vec::new(),
+            phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
             is_duplicate: false,

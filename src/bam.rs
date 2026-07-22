@@ -13,7 +13,7 @@ use noodles_sam::{
     alignment::record::data::field::{Tag, Value, value::Array},
 };
 
-use crate::cache::RenderRead;
+use crate::cache::{ReadPhase, RenderRead};
 use crate::error::LocusError;
 use crate::methylation::parse_modified_bases;
 use crate::region::Region;
@@ -224,6 +224,7 @@ fn record_to_render(record: &bam::Record) -> Option<RenderRead> {
     // Decode 4-bit packed sequence. as_ref() gives the raw encoded bytes.
     let sequence = decode_sequence(record.sequence().as_ref(), read_len);
     let methylation = parse_record_methylation(record, &sequence);
+    let phase = parse_record_phase(record);
 
     let end_0based = start_0based + ref_span;
     let name = record
@@ -246,10 +247,33 @@ fn record_to_render(record: &bam::Record) -> Option<RenderRead> {
         cigar_ops,
         sequence,
         methylation,
+        phase,
         is_secondary: flags.is_secondary(),
         is_supplementary: flags.is_supplementary(),
         is_duplicate: flags.is_duplicate(),
     })
+}
+
+fn parse_record_phase(record: &bam::Record) -> ReadPhase {
+    let data = record.data();
+    let haplotype =
+        parse_unsigned_integer_tag(&data, Tag::new(b'H', b'P')).filter(|haplotype| *haplotype > 0);
+    let phase_set = parse_unsigned_integer_tag(&data, Tag::new(b'P', b'S'));
+
+    ReadPhase {
+        haplotype,
+        phase_set,
+    }
+}
+
+fn parse_unsigned_integer_tag(data: &bam::record::Data<'_>, tag: Tag) -> Option<u32> {
+    data.get(&tag)
+        .and_then(Result::ok)
+        .and_then(parse_unsigned_integer_value)
+}
+
+fn parse_unsigned_integer_value(value: Value<'_>) -> Option<u32> {
+    value.as_int().and_then(|value| u32::try_from(value).ok())
 }
 
 fn parse_record_methylation(
@@ -292,6 +316,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn phase_tag_values_accept_unsigned_integer_encodings() {
+        assert_eq!(parse_unsigned_integer_value(Value::Int8(1)), Some(1));
+        assert_eq!(
+            parse_unsigned_integer_value(Value::UInt32(123_456)),
+            Some(123_456)
+        );
+    }
+
+    #[test]
+    fn phase_tag_values_reject_negative_and_non_integer_values() {
+        assert_eq!(parse_unsigned_integer_value(Value::Int32(-1)), None);
+        assert_eq!(parse_unsigned_integer_value(Value::Float(1.0)), None);
+    }
+
+    #[test]
     fn initial_region_centers_alignment_and_clamps_to_contig() {
         let contig = ContigInfo {
             name: "chr1".to_string(),
@@ -329,5 +368,39 @@ mod tests {
             reads.first().map(|read| read.name.as_str()),
             Some("read_ins_meth")
         );
+    }
+
+    #[test]
+    fn demo_reads_parse_tagged_untagged_and_malformed_phase_values() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let reads = source
+            .fetch_reads(&Region::new("chrDemo", 0, 154))
+            .expect("fetch demo reads");
+
+        let phase_for = |name: &str| {
+            reads
+                .iter()
+                .find(|read| read.name == name)
+                .map(|read| read.phase)
+                .unwrap_or_else(|| panic!("missing demo read {name}"))
+        };
+
+        assert_eq!(
+            phase_for("read_ins_meth"),
+            ReadPhase {
+                haplotype: Some(1),
+                phase_set: Some(50),
+            }
+        );
+        assert_eq!(
+            phase_for("read_del"),
+            ReadPhase {
+                haplotype: Some(2),
+                phase_set: Some(50),
+            }
+        );
+        assert_eq!(phase_for("read_reverse_meth"), ReadPhase::default());
+        assert_eq!(phase_for("read_bad_phase"), ReadPhase::default());
     }
 }

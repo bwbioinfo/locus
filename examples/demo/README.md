@@ -6,7 +6,7 @@ Files:
 
 - `demo.fa`: reference sequence for `chrDemo`
 - `demo.gff`: unsorted source annotation file
-- `demo.sam`: source alignments with an insertion, deletion, and MM/ML methylation tags
+- `demo.sam`: source alignments with insertion, deletion, MM/ML methylation, and HP/PS phasing tags
 - `build.sh`: regenerates indexed browser-ready files from the source inputs
 - `capture.sh`: rebuilds the data, drives the TUI demo keys, and refreshes README screenshot artifacts
 
@@ -27,7 +27,7 @@ cargo run -- examples/demo/demo.sorted.bam \
   --gff examples/demo/demo.sorted.gff.gz
 ```
 
-Inside the TUI, press `i`, `Tab`, `m`, and `s` to reproduce the expanded-insertion, methylation-enabled screenshot.
+Inside the TUI, press `i`, `Tab`, `m`, `p`, and `s` to reproduce the expanded-insertion, methylation- and phasing-enabled screenshot. The fixture contains HP1, HP2, untagged, and malformed phase-tag examples.
 
 To regenerate the committed screenshot artifacts:
 

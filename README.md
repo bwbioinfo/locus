@@ -64,11 +64,12 @@ The demo region includes:
 - a read insertion that can be expanded with `i` then `Tab`
 - a deletion rendered as `--`
 - MM/ML methylation calls shown with `m`
+- HP/PS-tagged reads colored by haplotype with `p`
 - a feature track loaded from a tabix-indexed GFF
 - an app-generated screenshot captured with `s`
 - dark and light terminal color themes toggled with `t`
 
-![Locus demo showing expanded insertion, methylation, and feature tracks](docs/images/demo-expanded-methylation.png)
+![Locus demo showing expanded insertion, methylation, phased reads, and feature tracks](docs/images/demo-expanded-methylation.png)
 
 ![Locus demo in light mode](docs/images/demo-light-expanded-methylation.png)
 
@@ -93,6 +94,7 @@ To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capt
 | `-` | Zoom out |
 | `i` | Toggle expanded insertion sequence |
 | `m` | Toggle read methylation display |
+| `p` | Toggle phased-read colors |
 | `Q` | Set minimum read MAPQ (`0` shows all reads) |
 | `t` | Toggle dark/light theme |
 | `Tab` / `Shift+Tab` | Move to next / previous expanded insertion |
@@ -123,11 +125,7 @@ To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capt
 
 ## Read Rendering
 
-Reads are colored by mapping quality:
-- **Green**: MAPQ ≥ 60
-- **Light green**: MAPQ ≥ 30
-- **Yellow**: MAPQ ≥ 10
-- **Gray**: MAPQ < 10
+With phase display off, read bodies use high, medium, or low contrast for MAPQ ≥ 60, MAPQ ≥ 30, and MAPQ < 30, respectively.
 
 Use `--min-mapq N` to set the initial minimum mapping quality. Press `Q` while browsing to change the threshold without rereading the BAM; enter `0` to show all mapped reads again. The threshold applies to both the read pileup and coverage track.
 
@@ -147,6 +145,15 @@ Methylation display:
 - Calls are rendered on aligned read bases after CIGAR mapping; soft-clipped or inserted bases are parsed but not drawn as reference-aligned methylation marks.
 
 The demo BAM includes forward and reverse-strand MM/ML calls so the `m` toggle visibly changes the read pileup.
+
+Phased-read display:
+- Press `p` to show or hide haplotype colors parsed from integer `HP` and `PS` BAM tags. The display is off by default.
+- HP1 reads are cyan, HP2 reads are magenta, and untagged or malformed reads are gray. Both dark and light themes use separate readable palettes.
+- MAPQ remains visible within each haplotype color: high-quality reads are bold, medium-quality reads use normal intensity, and reads below MAPQ 30 are dim.
+- Mismatch, insertion, deletion, and methylation styles override the phase background where they occur.
+- The initial implementation retains coordinate-based row packing when phasing is toggled, so alignments do not move. `PS` values remain available in the render model for future phase-set-aware interactions.
+
+The demo BAM includes HP1, HP2, untagged, and malformed-tag reads so the fallback behavior is visible and testable.
 
 Theme display:
 - Use `--light` to start with the light palette.
