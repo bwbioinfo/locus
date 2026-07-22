@@ -155,13 +155,14 @@ impl RegionCache {
     }
 
     /// Rebuild pileup layout for the visible sub-region, limited to `max_rows`.
-    pub fn layout_pileup(&mut self, visible: &Region, max_rows: usize) {
-        // Filter reads to those overlapping the visible region
+    pub fn layout_pileup(&mut self, visible: &Region, max_rows: usize, min_mapq: u8) {
         let visible_reads: Vec<usize> = self
             .reads
             .iter()
             .enumerate()
-            .filter(|(_, r)| r.start < visible.end && r.end > visible.start)
+            .filter(|(_, read)| {
+                read.mapq >= min_mapq && read.start < visible.end && read.end > visible.start
+            })
             .map(|(i, _)| i)
             .collect();
 
@@ -171,8 +172,8 @@ impl RegionCache {
     }
 
     /// Compute per-column coverage over `visible` region, binned to `cols` columns.
-    pub fn compute_coverage(&mut self, visible: &Region, cols: usize) {
-        self.coverage = bin_coverage(&self.reads, visible, cols);
+    pub fn compute_coverage(&mut self, visible: &Region, cols: usize, min_mapq: u8) {
+        self.coverage = bin_coverage(&self.reads, visible, cols, min_mapq);
     }
 }
 
@@ -212,7 +213,7 @@ fn pack_reads(indices: &[usize], reads: &[RenderRead], max_rows: usize) -> Vec<P
 }
 
 /// Bin per-base coverage into `cols` terminal columns.
-fn bin_coverage(reads: &[RenderRead], visible: &Region, cols: usize) -> Vec<u32> {
+fn bin_coverage(reads: &[RenderRead], visible: &Region, cols: usize, min_mapq: u8) -> Vec<u32> {
     if cols == 0 || visible.len() == 0 {
         return vec![0; cols];
     }
@@ -221,6 +222,10 @@ fn bin_coverage(reads: &[RenderRead], visible: &Region, cols: usize) -> Vec<u32>
     let bp_per_col = region_len / cols as f64;
 
     for read in reads {
+        if read.mapq < min_mapq {
+            continue;
+        }
+
         // intersect read with visible region
         let r_start = read.start.max(visible.start);
         let r_end = read.end.min(visible.end);
@@ -287,7 +292,7 @@ mod tests {
     fn test_bin_coverage_simple() {
         let visible = Region::new("chr1", 0, 100);
         let reads = vec![make_read("r1", 0, 50), make_read("r2", 50, 100)];
-        let bins = bin_coverage(&reads, &visible, 10);
+        let bins = bin_coverage(&reads, &visible, 10, 0);
         assert_eq!(bins.len(), 10);
         // each read covers 5 cols
         let total: u32 = bins.iter().sum();
@@ -298,8 +303,29 @@ mod tests {
     fn test_bin_coverage_overlap() {
         let visible = Region::new("chr1", 0, 100);
         let reads = vec![make_read("r1", 0, 100), make_read("r2", 0, 100)];
-        let bins = bin_coverage(&reads, &visible, 10);
+        let bins = bin_coverage(&reads, &visible, 10, 0);
         assert!(bins.iter().all(|&c| c == 2));
+    }
+
+    #[test]
+    fn mapq_filter_applies_to_pileup_and_coverage() {
+        let visible = Region::new("chr1", 0, 100);
+        let mut low = make_read("low", 0, 100);
+        low.mapq = 29;
+        let mut high = make_read("high", 0, 100);
+        high.mapq = 30;
+        let mut cache = RegionCache {
+            reads: vec![low, high],
+            ..RegionCache::default()
+        };
+
+        cache.layout_pileup(&visible, 10, 30);
+        cache.compute_coverage(&visible, 10, 30);
+
+        assert_eq!(cache.pileup_rows, vec![vec![1]]);
+        assert_eq!(cache.hidden_reads, 0);
+        assert!(cache.coverage.iter().all(|&count| count == 1));
+        assert_eq!(cache.reads.len(), 2);
     }
 
     fn methylated_call(read_pos: usize) -> ModifiedBaseCall {

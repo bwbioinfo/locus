@@ -41,11 +41,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.mode == Mode::ContigSelect {
         draw_contig_overlay(frame, app, area);
     }
+    if app.mode == Mode::MapqFilter {
+        draw_mapq_filter_overlay(frame, app, area);
+    }
 }
 
 fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     let bp_per_col = app.view_span() as f64 / app.view_cols().max(1) as f64;
-    let read_count = app.cache.reads.len();
+    let read_count =
+        app.cache.pileup_rows.iter().map(Vec::len).sum::<usize>() + app.cache.hidden_reads;
     let width = area.width as usize;
     let file_name = app
         .source
@@ -63,25 +67,13 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     let insertion_mode = insertion_mode_label(app.expand_insertions);
     let methylation_mode = methylation_mode_label(app.show_methylation);
     let theme_mode = theme_mode_label(app.theme);
+    let mapq_filter = mapq_filter_label(app.min_mapq);
     let metrics = format!(
-        " scale:{:.1} bp/col  reads:{}  {}  {}  {} ",
-        bp_per_col, read_count, insertion_mode, methylation_mode, theme_mode
+        " reads:{}  {}  scale:{:.1} bp/col  {}  {}  {} ",
+        read_count, mapq_filter, bp_per_col, insertion_mode, methylation_mode, theme_mode
     );
-    let mut status = app.status_msg.as_ref().map(|msg| format!(" status:{msg} "));
-
-    let status_width = status.as_ref().map_or(0, |s| s.len());
-    let reserved = metrics.len() + status_width;
-    let identity_width = width.saturating_sub(reserved);
-    let identity = truncate_to_width(&identity, identity_width);
-    let metrics = truncate_to_width(
-        &metrics,
-        width.saturating_sub(identity.len() + status_width),
-    );
-
-    if let Some(ref mut status) = status {
-        let used = identity.len() + metrics.len();
-        *status = truncate_to_width(status, width.saturating_sub(used));
-    }
+    let status = app.status_msg.as_ref().map(|msg| format!(" status:{msg} "));
+    let (identity, metrics, status) = fit_top_bar(&identity, &metrics, status.as_deref(), width);
 
     let used = identity.len() + metrics.len() + status.as_ref().map_or(0, |s| s.len());
     let pad_len = width.saturating_sub(used);
@@ -129,6 +121,14 @@ fn theme_mode_label(theme: crate::theme::Theme) -> &'static str {
     }
 }
 
+fn mapq_filter_label(min_mapq: u8) -> String {
+    if min_mapq == 0 {
+        "mapq:all".to_string()
+    } else {
+        format!("mapq>={min_mapq}")
+    }
+}
+
 fn truncate_to_width(text: &str, width: usize) -> String {
     if text.len() <= width {
         return text.to_string();
@@ -146,6 +146,27 @@ fn truncate_to_width(text: &str, width: usize) -> String {
         .collect::<String>();
     out.push('~');
     out
+}
+
+fn fit_top_bar(
+    identity: &str,
+    metrics: &str,
+    status: Option<&str>,
+    width: usize,
+) -> (String, String, Option<String>) {
+    if width == 0 {
+        return (String::new(), String::new(), status.map(|_| String::new()));
+    }
+
+    let identity_budget = if width < 40 { width / 2 } else { width * 2 / 5 };
+    let identity = truncate_to_width(identity, identity_budget.max(1).min(width));
+    let remaining = width.saturating_sub(identity.len());
+    let status_reserve = status.map_or(0, |text| (remaining / 3).min(text.len()));
+    let metrics = truncate_to_width(metrics, remaining.saturating_sub(status_reserve));
+    let status = status
+        .map(|text| truncate_to_width(text, width.saturating_sub(identity.len() + metrics.len())));
+
+    (identity, metrics, status)
 }
 
 fn format_region_display(app: &App) -> String {
@@ -261,14 +282,15 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
     let keys = match app.mode {
         Mode::Normal => {
             if app.gff.is_some() {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  Q:MAPQ  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
             } else {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  Q:MAPQ  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
             }
         }
         Mode::GoTo => " Enter:confirm  Esc:cancel",
         Mode::FeatureSearch => " type to search  Enter:jump  Tab/↑↓:cycle results  Esc:cancel",
         Mode::ContigSelect => " Enter:select  Esc:cancel",
+        Mode::MapqFilter => " 0:show all  Enter:apply  Esc:cancel",
         Mode::Help => " Esc/q/?:close help",
     };
     frame.render_widget(
@@ -381,6 +403,25 @@ fn draw_feature_search_overlay(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn draw_mapq_filter_overlay(frame: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(50, 12, area);
+    let popup = Rect { height: 3, ..popup };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Minimum MAPQ: {}_  (current: {})",
+            app.command_buffer, app.min_mapq
+        ))
+        .block(
+            Block::default()
+                .title(" Read Quality Filter (0 shows all) ")
+                .borders(Borders::ALL),
+        )
+        .style(Style::default().fg(app.theme.chrome_fg())),
+        popup,
+    );
+}
+
 fn draw_contig_overlay(frame: &mut Frame, app: &App, area: Rect) {
     let popup = centered_rect(40, 60, area);
     frame.render_widget(Clear, popup);
@@ -432,6 +473,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         Line::from("  ↓ / -      Zoom out"),
         Line::from("  i          Toggle expanded insertion sequence"),
         Line::from("  m          Toggle read methylation"),
+        Line::from("  Q          Set minimum read MAPQ (0 shows all)"),
         Line::from("  t          Toggle dark/light theme"),
         Line::from("  Tab        Move to next expanded insertion"),
         Line::from("  Shift+Tab  Move to previous expanded insertion"),
@@ -496,6 +538,20 @@ mod tests {
     }
 
     #[test]
+    fn top_bar_preserves_identity_and_mapq_at_terminal_width() {
+        let identity = " LOCUS  file:demo.sorted.bam  region:chrDemo:1-154 ";
+        let metrics = " reads:3  mapq>=30  scale:2.0 bp/col  ins:collapsed  meth:off  theme:dark ";
+        let status = " status:minimum MAPQ set to 30 ";
+
+        let (identity, metrics, status) = fit_top_bar(identity, metrics, Some(status), 80);
+        let status = status.expect("status remains present");
+
+        assert!(identity.starts_with(" LOCUS"));
+        assert!(metrics.contains("mapq>=30"));
+        assert!(identity.len() + metrics.len() + status.len() <= 80);
+    }
+
+    #[test]
     fn methylation_mode_label_reflects_toggle_state() {
         assert_eq!(methylation_mode_label(false), "meth:off");
         assert_eq!(methylation_mode_label(true), "meth:on");
@@ -511,5 +567,11 @@ mod tests {
     fn theme_mode_label_reflects_theme_state() {
         assert_eq!(theme_mode_label(crate::theme::Theme::Dark), "theme:dark");
         assert_eq!(theme_mode_label(crate::theme::Theme::Light), "theme:light");
+    }
+
+    #[test]
+    fn mapq_filter_label_reflects_threshold() {
+        assert_eq!(mapq_filter_label(0), "mapq:all");
+        assert_eq!(mapq_filter_label(30), "mapq>=30");
     }
 }

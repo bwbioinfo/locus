@@ -27,6 +27,7 @@ fn dispatch(app: &mut App, key: KeyEvent) -> Result<()> {
         Mode::GoTo => handle_goto(app, key),
         Mode::FeatureSearch => handle_feature_search(app, key),
         Mode::ContigSelect => handle_contig_select(app, key),
+        Mode::MapqFilter => handle_mapq_filter(app, key),
         Mode::Help => handle_help(app, key),
     }
 }
@@ -49,6 +50,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('i') => app.toggle_insertions(),
         KeyCode::Char('m') => app.toggle_methylation(),
         KeyCode::Char('t') => app.toggle_theme(),
+        KeyCode::Char('Q') => app.begin_mapq_filter(),
         KeyCode::Tab => app.cycle_insertion_expansion(true),
         KeyCode::BackTab => app.cycle_insertion_expansion(false),
 
@@ -158,6 +160,21 @@ fn handle_contig_select(app: &mut App, key: KeyEvent) -> Result<()> {
             app.command_buffer.pop();
         }
         KeyCode::Char(c) if c.is_ascii_digit() => app.command_buffer.push(c),
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_mapq_filter(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Enter => app.confirm_mapq_filter(),
+        KeyCode::Esc => app.cancel_input(),
+        KeyCode::Backspace => {
+            app.command_buffer.pop();
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() && app.command_buffer.len() < 3 => {
+            app.command_buffer.push(c);
+        }
         _ => {}
     }
     Ok(())

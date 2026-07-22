@@ -79,7 +79,7 @@ fn main() -> Result<()> {
     } else {
         Theme::Dark
     };
-    let mut app = App::new(source, gff, reference, initial_region, theme)?;
+    let mut app = App::new(source, gff, reference, initial_region, theme, args.min_mapq)?;
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();

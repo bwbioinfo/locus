@@ -36,6 +36,9 @@ locus sample.bam --gff hg38.ncbiRefSeq.gtf.gz
 # Start in light mode
 locus sample.bam --light
 
+# Hide reads below mapping quality 30
+locus sample.bam --min-mapq 30
+
 # Prepare a sorted, BGZF-compressed, tabix-indexed annotation file
 locus prepare-annotations hg38.ncbiRefSeq.gtf --output hg38.ncbiRefSeq.sorted.gtf.gz
 ```
@@ -90,6 +93,7 @@ To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capt
 | `-` | Zoom out |
 | `i` | Toggle expanded insertion sequence |
 | `m` | Toggle read methylation display |
+| `Q` | Set minimum read MAPQ (`0` shows all reads) |
 | `t` | Toggle dark/light theme |
 | `Tab` / `Shift+Tab` | Move to next / previous expanded insertion |
 | `g` | Go to region (e.g. `chr1:100000-200000`) |
@@ -124,6 +128,8 @@ Reads are colored by mapping quality:
 - **Light green**: MAPQ ≥ 30
 - **Yellow**: MAPQ ≥ 10
 - **Gray**: MAPQ < 10
+
+Use `--min-mapq N` to set the initial minimum mapping quality. Press `Q` while browsing to change the threshold without rereading the BAM; enter `0` to show all mapped reads again. The threshold applies to both the read pileup and coverage track.
 
 CIGAR operations:
 - `>` / `<` — alignment match (forward / reverse strand)
