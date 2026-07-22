@@ -24,6 +24,10 @@ pub struct Args {
     /// Start with the light color theme
     #[arg(long)]
     pub light: bool,
+
+    /// Hide reads with mapping quality below this threshold
+    #[arg(long, default_value_t = 0)]
+    pub min_mapq: u8,
 }
 
 #[derive(Subcommand, Debug)]
@@ -37,4 +41,29 @@ pub enum Command {
         #[arg(long, short)]
         output: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_min_mapq_threshold() {
+        let args = Args::try_parse_from(["locus", "sample.bam", "--min-mapq", "30"])
+            .expect("parse valid minimum MAPQ");
+
+        assert_eq!(args.min_mapq, 30);
+    }
+
+    #[test]
+    fn defaults_min_mapq_to_zero() {
+        let args = Args::try_parse_from(["locus", "sample.bam"]).expect("parse defaults");
+
+        assert_eq!(args.min_mapq, 0);
+    }
+
+    #[test]
+    fn rejects_min_mapq_above_u8_range() {
+        assert!(Args::try_parse_from(["locus", "sample.bam", "--min-mapq", "256"]).is_err());
+    }
 }

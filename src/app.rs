@@ -24,6 +24,8 @@ pub enum Mode {
     FeatureSearch,
     /// Choosing a contig from a list
     ContigSelect,
+    /// Typing a minimum mapping-quality threshold
+    MapqFilter,
     Help,
 }
 
@@ -58,6 +60,7 @@ pub struct App {
     pub selected_insertion_ref_pos: Option<u64>,
     pub show_methylation: bool,
     pub theme: Theme,
+    pub min_mapq: u8,
 
     /// Set to true to request a clean exit
     pub should_quit: bool,
@@ -78,6 +81,7 @@ impl App {
         reference: Option<ReferenceStore>,
         initial_region: Option<Region>,
         theme: Theme,
+        min_mapq: u8,
     ) -> Result<Self> {
         let (view_start, view_end) = if let Some(ref r) = initial_region {
             (r.start, r.end)
@@ -120,6 +124,7 @@ impl App {
             selected_insertion_ref_pos: None,
             show_methylation: false,
             theme,
+            min_mapq,
             should_quit: false,
             needs_fetch: true,
             feature_matches: Vec::new(),
@@ -303,8 +308,10 @@ impl App {
             .terminal_rows
             .saturating_sub(12 + reference_rows as u16) as usize;
         let cols = self.view_cols();
-        self.cache.layout_pileup(&visible, max_rows.max(1));
-        self.cache.compute_coverage(&visible, cols.max(1));
+        self.cache
+            .layout_pileup(&visible, max_rows.max(1), self.min_mapq);
+        self.cache
+            .compute_coverage(&visible, cols.max(1), self.min_mapq);
     }
 
     pub fn jump_to_region(&mut self, region: &Region) -> Result<()> {
@@ -429,8 +436,10 @@ impl App {
             None
         };
         self.cache.loaded_region = Some(padded);
-        self.cache.layout_pileup(&visible, max_pileup_rows.max(1));
-        self.cache.compute_coverage(&visible, view_cols.max(1));
+        self.cache
+            .layout_pileup(&visible, max_pileup_rows.max(1), self.min_mapq);
+        self.cache
+            .compute_coverage(&visible, view_cols.max(1), self.min_mapq);
 
         self.needs_fetch = false;
         self.status_msg = None;
@@ -474,6 +483,29 @@ impl App {
         Ok(())
     }
 
+    pub fn begin_mapq_filter(&mut self) {
+        self.mode = Mode::MapqFilter;
+        self.command_buffer.clear();
+        self.status_msg = None;
+    }
+
+    pub fn confirm_mapq_filter(&mut self) {
+        let Ok(min_mapq) = self.command_buffer.trim().parse::<u8>() else {
+            self.status_msg = Some("minimum MAPQ must be between 0 and 255".to_string());
+            return;
+        };
+
+        self.min_mapq = min_mapq;
+        self.command_buffer.clear();
+        self.mode = Mode::Normal;
+        self.relayout();
+        self.status_msg = Some(if min_mapq == 0 {
+            "MAPQ filter disabled".to_string()
+        } else {
+            format!("minimum MAPQ set to {min_mapq}")
+        });
+    }
+
     pub fn cancel_input(&mut self) {
         self.command_buffer.clear();
         self.mode = Mode::Normal;
@@ -492,5 +524,52 @@ impl App {
         if self.view_end == self.view_start {
             self.view_end = self.view_start + 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    fn demo_app(min_mapq: u8) -> App {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+
+        App::new(source, None, None, None, Theme::Dark, min_mapq).expect("create app")
+    }
+
+    #[test]
+    fn mapq_prompt_applies_without_refetching() {
+        let mut app = demo_app(0);
+        app.needs_fetch = false;
+        app.begin_mapq_filter();
+        app.command_buffer.push_str("30");
+
+        app.confirm_mapq_filter();
+
+        assert_eq!(app.min_mapq, 30);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(!app.needs_fetch);
+        assert_eq!(app.status_msg.as_deref(), Some("minimum MAPQ set to 30"));
+    }
+
+    #[test]
+    fn mapq_prompt_rejects_out_of_range_value() {
+        let mut app = demo_app(10);
+        app.needs_fetch = false;
+        app.begin_mapq_filter();
+        app.command_buffer.push_str("256");
+
+        app.confirm_mapq_filter();
+
+        assert_eq!(app.min_mapq, 10);
+        assert_eq!(app.mode, Mode::MapqFilter);
+        assert!(!app.needs_fetch);
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("minimum MAPQ must be between 0 and 255")
+        );
     }
 }
