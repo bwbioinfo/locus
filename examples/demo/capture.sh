@@ -28,6 +28,8 @@ capture_demo() {
     sleep 0.3
     printf 'p'
     sleep 0.3
+    printf '\033[<0;38;16M'
+    sleep 0.3
     printf 's'
     sleep 0.8
     printf 'q'

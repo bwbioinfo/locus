@@ -58,6 +58,8 @@ pub struct App {
     pub terminal_rows: u16,
     pub expand_insertions: bool,
     pub selected_insertion_ref_pos: Option<u64>,
+    /// 0-based genomic position selected with the mouse.
+    pub selected_ref_pos: Option<u64>,
     pub show_methylation: bool,
     pub show_phasing: bool,
     pub theme: Theme,
@@ -123,6 +125,7 @@ impl App {
             terminal_rows: 24,
             expand_insertions: false,
             selected_insertion_ref_pos: None,
+            selected_ref_pos: None,
             show_methylation: false,
             show_phasing: false,
             theme,
@@ -252,6 +255,13 @@ impl App {
         selected_insertion_gap(&self.cache.reads, &self.cache.pileup_rows, transform)
     }
 
+    pub fn select_reference_position(&mut self, pos: u64) {
+        if (self.view_start..self.view_end).contains(&pos) {
+            self.selected_ref_pos = Some(pos);
+            self.status_msg = None;
+        }
+    }
+
     fn base_view_transform(&self) -> ViewTransform {
         ViewTransform::new(
             self.view_start,
@@ -300,6 +310,7 @@ impl App {
     /// If the new view is within the cached padded region, just re-layout without disk IO.
     /// Only set needs_fetch=true when the view has drifted outside the loaded window.
     fn mark_dirty(&mut self) {
+        self.selected_ref_pos = None;
         let within_cache = self.cache.loaded_region.as_ref().is_some_and(|loaded| {
             loaded.contig == self.current_contig()
                 && self.view_start >= loaded.start
@@ -335,6 +346,7 @@ impl App {
             .ok_or_else(|| crate::error::LocusError::UnknownContig(region.contig.clone()))?;
 
         self.contig_idx = idx;
+        self.selected_ref_pos = None;
         let len = self.current_contig_len();
 
         self.view_start = region.start.min(len.saturating_sub(1));
@@ -352,6 +364,7 @@ impl App {
     pub fn select_contig(&mut self, idx: usize) {
         if idx < self.source.contigs.len() {
             self.contig_idx = idx;
+            self.selected_ref_pos = None;
             let len = self.current_contig_len();
             self.view_start = 0;
             self.view_end = 1_000.min(len);
@@ -614,5 +627,21 @@ mod tests {
         assert!(app.cache.phase_layout.is_none());
         assert_eq!(app.cache.pileup_rows, combined_rows);
         assert_eq!(app.status_msg.as_deref(), Some("phasing hidden"));
+    }
+
+    #[test]
+    fn selecting_a_position_does_not_refetch_and_navigation_clears_it() {
+        let mut app = demo_app(0);
+        app.needs_fetch = false;
+        let selected = app.view_start + 10;
+
+        app.select_reference_position(selected);
+
+        assert_eq!(app.selected_ref_pos, Some(selected));
+        assert!(!app.needs_fetch);
+
+        app.pan(1);
+
+        assert!(app.selected_ref_pos.is_none());
     }
 }

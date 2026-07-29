@@ -69,7 +69,7 @@ The demo region includes:
 - an app-generated screenshot captured with `s`
 - dark and light terminal color themes toggled with `t`
 
-![Locus demo showing expanded insertion, methylation, phased reads, and feature tracks](docs/images/demo-expanded-methylation.png)
+![Locus demo showing a selected genomic position, expanded insertion, methylation, phased reads, and feature tracks](docs/images/demo-expanded-methylation.png)
 
 ![Locus demo in light mode](docs/images/demo-light-expanded-methylation.png)
 
@@ -92,6 +92,7 @@ To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capt
 | `L` | Pan right (large step) |
 | `+` / `=` | Zoom in |
 | `-` | Zoom out |
+| Left click | Select a genomic position and highlight occupied read cells |
 | `i` | Toggle expanded insertion sequence |
 | `m` | Toggle read methylation display |
 | `p` | Toggle separate HP1/HP2 read tracks |
@@ -145,6 +146,11 @@ Methylation display:
 - Calls are rendered on aligned read bases after CIGAR mapping; soft-clipped or inserted bases are parsed but not drawn as reference-aligned methylation marks.
 
 The demo BAM includes forward and reverse-strand MM/ML calls so the `m` toggle visibly changes the read pileup.
+
+Position selection:
+- Left-click anywhere in the genomic canvas to select its reference coordinate. The top bar shows `pos:contig:position` using a 1-based position.
+- Occupied read cells at that coordinate are reversed and underlined across all visible read tracks without replacing their base, indel, methylation, phase, or MAPQ styles.
+- When an insertion is expanded, clicking any gap cell selects the insertion anchor. Selections clear when navigating to a different view or contig.
 
 Phased-read display:
 - Press `p` to switch between the combined pileup and separate haplotype tracks parsed from integer `HP` and `PS` BAM tags. The separated display is off by default.
@@ -207,5 +213,5 @@ trait Track {
 
 ## Non-goals (first pass)
 
-CRAM, VCF, BED tracks, split-read/SV visualization, mouse interaction,
+CRAM, VCF, BED tracks, split-read/SV visualization,
 remote files, multi-sample browsing.
