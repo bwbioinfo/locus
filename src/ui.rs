@@ -330,7 +330,7 @@ fn draw_phased_pileup(
     area: Rect,
     layout: &PhasePileupLayout,
 ) {
-    let areas = phase_track_areas(area, layout.unphased_rows.is_some());
+    let areas = phase_track_areas(area, layout);
     draw_phase_section(
         frame,
         app,
@@ -465,15 +465,15 @@ fn render_reads_track(
     );
 }
 
-fn phase_track_areas(area: Rect, has_unphased: bool) -> [Rect; 3] {
-    let unphased_height = if has_unphased && area.height >= 4 {
-        (area.height / 5).max(2)
-    } else {
-        0
-    };
-    let phased_height = area.height.saturating_sub(unphased_height);
-    let hp1_height = phased_height.div_ceil(2);
-    let hp2_height = phased_height / 2;
+fn phase_track_areas(area: Rect, layout: &PhasePileupLayout) -> [Rect; 3] {
+    let mut remaining_height = area.height;
+    let hp1_height = phase_section_height(&mut remaining_height, layout.hp1_rows.len(), true);
+    let hp2_height = phase_section_height(&mut remaining_height, layout.hp2_rows.len(), true);
+    let unphased_height = phase_section_height(
+        &mut remaining_height,
+        layout.unphased_rows.as_ref().map_or(0, |rows| rows.len()),
+        layout.unphased_rows.is_some(),
+    );
 
     let hp1 = Rect {
         height: hp1_height,
@@ -491,6 +491,17 @@ fn phase_track_areas(area: Rect, has_unphased: bool) -> [Rect; 3] {
     };
 
     [hp1, hp2, unphased]
+}
+
+fn phase_section_height(remaining_height: &mut u16, row_count: usize, present: bool) -> u16 {
+    if !present {
+        return 0;
+    }
+
+    let requested = u16::try_from(row_count.saturating_add(1)).unwrap_or(u16::MAX);
+    let height = requested.min(*remaining_height);
+    *remaining_height = remaining_height.saturating_sub(height);
+    height
 }
 
 fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -748,8 +759,12 @@ fn centered_rect(pct_x: u16, pct_y: u16, r: Rect) -> Rect {
 mod tests {
     use std::path::Path;
 
+    use ratatui::{Terminal, backend::TestBackend};
+
     use super::*;
-    use crate::{bam::BamSource, region::Region, theme::Theme};
+    use crate::{
+        bam::BamSource, gff::GffStore, reference::ReferenceStore, region::Region, theme::Theme,
+    };
 
     #[test]
     fn truncate_to_width_respects_small_widths() {
@@ -788,24 +803,102 @@ mod tests {
     }
 
     #[test]
-    fn phase_track_areas_are_contiguous_and_bounded() {
+    fn phase_track_areas_are_compact_and_contiguous() {
         let area = Rect::new(7, 11, 80, 15);
-        let [hp1, hp2, unphased] = phase_track_areas(area, true);
+        let layout = PhasePileupLayout {
+            hp1_rows: 0..1,
+            hp2_rows: 1..2,
+            unphased_rows: Some(2..3),
+            ..PhasePileupLayout::default()
+        };
+        let [hp1, hp2, unphased] = phase_track_areas(area, &layout);
 
-        assert_eq!(hp1, Rect::new(7, 11, 80, 6));
-        assert_eq!(hp2, Rect::new(7, 17, 80, 6));
-        assert_eq!(unphased, Rect::new(7, 23, 80, 3));
-        assert_eq!(unphased.y + unphased.height, area.y + area.height);
+        assert_eq!(hp1, Rect::new(7, 11, 80, 2));
+        assert_eq!(hp2, Rect::new(7, 13, 80, 2));
+        assert_eq!(unphased, Rect::new(7, 15, 80, 2));
+        assert_eq!(unphased.y, hp2.y + hp2.height);
+        assert!(unphased.y + unphased.height < area.y + area.height);
     }
 
     #[test]
-    fn phase_track_areas_split_only_haplotypes_without_unphased_reads() {
+    fn phase_track_areas_fit_dense_rows_and_omit_unphased_section() {
         let area = Rect::new(2, 3, 40, 7);
-        let [hp1, hp2, unphased] = phase_track_areas(area, false);
+        let layout = PhasePileupLayout {
+            hp1_rows: 0..3,
+            hp2_rows: 3..5,
+            ..PhasePileupLayout::default()
+        };
+        let [hp1, hp2, unphased] = phase_track_areas(area, &layout);
 
         assert_eq!(hp1, Rect::new(2, 3, 40, 4));
         assert_eq!(hp2, Rect::new(2, 7, 40, 3));
         assert_eq!(unphased, Rect::new(2, 10, 40, 0));
+    }
+
+    #[test]
+    fn phase_section_height_reserves_a_header_for_hidden_rows() {
+        let mut remaining_height = 2;
+
+        assert_eq!(phase_section_height(&mut remaining_height, 0, true), 1);
+        assert_eq!(remaining_height, 1);
+        assert_eq!(phase_section_height(&mut remaining_height, 0, false), 0);
+    }
+
+    #[test]
+    fn rendered_phase_sections_follow_their_packed_rows() {
+        let demo_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo");
+        let source = BamSource::open(demo_dir.join("demo.sorted.bam")).expect("open demo BAM");
+        let gff = GffStore::load(demo_dir.join("demo.sorted.gff.gz")).expect("open demo GFF");
+        let reference = ReferenceStore::load(demo_dir.join("demo.fa")).expect("open demo FASTA");
+        let mut app = App::new(
+            source,
+            Some(gff),
+            Some(reference),
+            Some(Region::new("chrDemo", 44, 115)),
+            Theme::Dark,
+            0,
+        )
+        .expect("create app");
+        app.terminal_cols = 110;
+        app.terminal_rows = 20;
+        app.refresh().expect("load demo reads");
+        app.toggle_phasing();
+
+        let layout = app.cache.phase_layout.as_ref().expect("phased layout");
+        assert_eq!(layout.hp1_rows.len(), 1);
+        assert_eq!(layout.hp2_rows.len(), 1);
+        assert_eq!(
+            layout.unphased_rows.as_ref().map_or(0, |rows| rows.len()),
+            1
+        );
+
+        let backend = TestBackend::new(app.terminal_cols, app.terminal_rows);
+        let mut terminal = Terminal::new(backend).expect("test backend is infallible");
+        terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+
+        let lines = (0..app.terminal_rows)
+            .map(|row| {
+                (0..app.terminal_cols)
+                    .filter_map(|col| terminal.backend().buffer().cell((col, row)))
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let hp1 = lines
+            .iter()
+            .position(|line| line.contains("HP1  1 read"))
+            .expect("HP1 header");
+        let hp2 = lines
+            .iter()
+            .position(|line| line.contains("HP2  1 read"))
+            .expect("HP2 header");
+        let unphased = lines
+            .iter()
+            .position(|line| line.contains("Unphased  2 reads"))
+            .expect("unphased header");
+
+        assert_eq!(hp2, hp1 + 2);
+        assert_eq!(unphased, hp2 + 2);
     }
 
     #[test]
