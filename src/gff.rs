@@ -8,9 +8,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use flate2::read::MultiGzDecoder;
-use noodles_bgzf_044 as bgzf044;
-use noodles_core_018::Position;
-use noodles_csi_052::binning_index::index::reference_sequence::bin::Chunk;
+use noodles_bgzf as bgzf;
+use noodles_core::Position;
+use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
 use noodles_tabix as tabix;
 
 use crate::cache::Strand;
@@ -282,7 +282,7 @@ fn query_indexed_features(
     Ok(features)
 }
 
-fn tabix_region(contig: &str, start: u64, end: u64) -> io::Result<noodles_core_018::Region> {
+fn tabix_region(contig: &str, start: u64, end: u64) -> io::Result<noodles_core::Region> {
     let start = start.saturating_add(1);
     let end = end.max(start);
     format!("{contig}:{start}-{end}")
@@ -306,7 +306,7 @@ fn write_bgzf_and_tabix(
     records: &[AnnotationRecord],
 ) -> io::Result<()> {
     let file = File::create(output)?;
-    let mut writer = bgzf044::io::Writer::new(file);
+    let mut writer = bgzf::io::Writer::new(file);
     let mut indexer = tabix::index::Indexer::default();
 
     for line in header_lines {

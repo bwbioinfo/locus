@@ -53,7 +53,7 @@ pub struct BamSource {
     pub contigs: Vec<ContigInfo>,
     // Persistent reader: avoids re-opening + re-reading the index on every fetch.
     // RefCell gives interior mutability for &self fetch_reads.
-    reader: RefCell<bam::io::IndexedReader<bgzf::Reader<File>>>,
+    reader: RefCell<bam::io::IndexedReader<bgzf::io::Reader<File>>>,
 }
 
 impl BamSource {
@@ -172,6 +172,7 @@ impl BamSource {
             .with_context(|| format!("querying region {}", region))?;
 
         let reads = query
+            .records()
             .filter_map(|r| r.ok())
             .filter_map(|rec| record_to_render(&rec))
             .collect();

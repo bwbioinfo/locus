@@ -25,8 +25,10 @@ pub fn save(app: &App) -> io::Result<ScreenshotPaths> {
     let cols = app.terminal_cols.max(1);
     let rows = app.terminal_rows.max(1);
     let backend = TestBackend::new(cols, rows);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.draw(|frame| ui::draw(frame, app))?;
+    let mut terminal = Terminal::new(backend).unwrap_or_else(|err| match err {});
+    terminal
+        .draw(|frame| ui::draw(frame, app))
+        .unwrap_or_else(|err| match err {});
 
     let paths = screenshot_paths()?;
     let buffer = terminal.backend().buffer();
