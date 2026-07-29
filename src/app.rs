@@ -190,8 +190,9 @@ impl App {
 
     pub fn toggle_phasing(&mut self) {
         self.show_phasing = !self.show_phasing;
+        self.relayout();
         self.status_msg = Some(if self.show_phasing {
-            "phasing shown: HP1 cyan, HP2 magenta, unphased gray".to_string()
+            "phasing split into HP1 and HP2 tracks; unphased reads separated".to_string()
         } else {
             "phasing hidden".to_string()
         });
@@ -320,7 +321,7 @@ impl App {
             .saturating_sub(12 + reference_rows as u16) as usize;
         let cols = self.view_cols();
         self.cache
-            .layout_pileup(&visible, max_rows.max(1), self.min_mapq);
+            .layout_pileup(&visible, max_rows.max(1), self.min_mapq, self.show_phasing);
         self.cache
             .compute_coverage(&visible, cols.max(1), self.min_mapq);
     }
@@ -447,8 +448,12 @@ impl App {
             None
         };
         self.cache.loaded_region = Some(padded);
-        self.cache
-            .layout_pileup(&visible, max_pileup_rows.max(1), self.min_mapq);
+        self.cache.layout_pileup(
+            &visible,
+            max_pileup_rows.max(1),
+            self.min_mapq,
+            self.show_phasing,
+        );
         self.cache
             .compute_coverage(&visible, view_cols.max(1), self.min_mapq);
 
@@ -588,15 +593,26 @@ mod tests {
     fn phasing_is_off_by_default_and_toggles_without_refetching() {
         let mut app = demo_app(0);
         assert!(!app.show_phasing);
-        app.needs_fetch = false;
+        app.refresh().expect("load demo reads");
+        assert!(app.cache.phase_layout.is_none());
+        let combined_rows = app.cache.pileup_rows.clone();
 
         app.toggle_phasing();
 
         assert!(app.show_phasing);
         assert!(!app.needs_fetch);
+        assert!(app.cache.phase_layout.is_some());
         assert_eq!(
             app.status_msg.as_deref(),
-            Some("phasing shown: HP1 cyan, HP2 magenta, unphased gray")
+            Some("phasing split into HP1 and HP2 tracks; unphased reads separated")
         );
+
+        app.toggle_phasing();
+
+        assert!(!app.show_phasing);
+        assert!(!app.needs_fetch);
+        assert!(app.cache.phase_layout.is_none());
+        assert_eq!(app.cache.pileup_rows, combined_rows);
+        assert_eq!(app.status_msg.as_deref(), Some("phasing hidden"));
     }
 }
