@@ -27,7 +27,7 @@ cargo run -- examples/demo/demo.sorted.bam \
   --gff examples/demo/demo.sorted.gff.gz
 ```
 
-Inside the TUI, press `i`, `Tab`, `m`, `p`, and `s` to reproduce the expanded-insertion, methylation- and phasing-enabled screenshot. The fixture contains HP1, HP2, untagged, and malformed phase-tag examples.
+Inside the TUI, press `i`, `Tab`, `m`, `p`, and `s` to reproduce the expanded-insertion, methylation-enabled screenshot with separate HP1 and HP2 tracks. The neutral section contains both untagged and malformed phase-tag examples.
 
 To regenerate the committed screenshot artifacts:
 

@@ -1,15 +1,18 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::app::{App, Mode};
 use crate::render::{
     ViewTransform, coverage::CoverageTrack, features::FeaturesTrack, reads::ReadsTrack,
     reference::ReferenceTrack, ruler::Ruler,
+};
+use crate::{
+    app::{App, Mode},
+    cache::{PhasePileupLayout, PileupRow},
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -122,7 +125,7 @@ fn methylation_mode_label(shown: bool) -> &'static str {
 }
 
 fn phasing_mode_label(shown: bool) -> &'static str {
-    if shown { "phase:on" } else { "phase:off" }
+    if shown { "phase:tracks" } else { "phase:off" }
 }
 
 fn theme_mode_label(theme: crate::theme::Theme) -> &'static str {
@@ -141,7 +144,7 @@ fn mapq_filter_label(min_mapq: u8) -> String {
 }
 
 fn truncate_to_width(text: &str, width: usize) -> String {
-    if text.len() <= width {
+    if text.chars().count() <= width {
         return text.to_string();
     }
     if width == 0 {
@@ -172,7 +175,7 @@ fn fit_top_bar(
     let identity_budget = if width < 40 { width / 2 } else { width * 2 / 5 };
     let identity = truncate_to_width(identity, identity_budget.max(1).min(width));
     let remaining = width.saturating_sub(identity.len());
-    let status_reserve = status.map_or(0, |text| (remaining / 3).min(text.len()));
+    let status_reserve = status.map_or(0, |text| (remaining / 4).min(text.len()));
     let metrics = truncate_to_width(metrics, remaining.saturating_sub(status_reserve));
     let status = status
         .map(|text| truncate_to_width(text, width.saturating_sub(identity.len() + metrics.len())));
@@ -257,30 +260,27 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     );
     chunk_idx += 1;
 
-    // Reads pileup
-    let show_names = area.width > 80;
-    frame.render_widget(
-        ReadsTrack {
-            reads: &app.cache.reads,
-            rows: &app.cache.pileup_rows,
-            reference: app.cache.reference.as_ref(),
-            transform,
-            show_names,
-            expand_insertions: app.expand_insertions,
-            show_methylation: app.show_methylation,
-            show_phasing: app.show_phasing,
-            theme: app.theme,
-        },
-        chunks[chunk_idx],
-    );
+    let reads_area = chunks[chunk_idx];
+    if app.show_phasing {
+        if let Some(layout) = app.cache.phase_layout.as_ref() {
+            draw_phased_pileup(frame, app, transform, reads_area, layout);
+        } else {
+            draw_standard_pileup(frame, app, transform, reads_area);
+        }
+    } else {
+        draw_standard_pileup(frame, app, transform, reads_area);
+    }
+}
 
-    // Hidden reads notice
+fn draw_standard_pileup(frame: &mut Frame, app: &App, transform: ViewTransform, area: Rect) {
+    render_reads_track(frame, app, transform, &app.cache.pileup_rows, area);
+
     if app.cache.hidden_reads > 0 {
         let msg = format!(" +{} reads hidden ", app.cache.hidden_reads);
         let notice_area = Rect {
             x: area.x,
             y: area.y + area.height.saturating_sub(1),
-            width: msg.len() as u16,
+            width: (msg.len() as u16).min(area.width),
             height: 1,
         };
         frame.render_widget(
@@ -290,13 +290,176 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn draw_phased_pileup(
+    frame: &mut Frame,
+    app: &App,
+    transform: ViewTransform,
+    area: Rect,
+    layout: &PhasePileupLayout,
+) {
+    let areas = phase_track_areas(area, layout.unphased_rows.is_some());
+    draw_phase_section(
+        frame,
+        app,
+        transform,
+        PhaseSection {
+            area: areas[0],
+            label: "HP1",
+            color: app.theme.phase_hp1_fg(),
+            rows: &app.cache.pileup_rows[layout.hp1_rows.clone()],
+            hidden_reads: layout.hp1_hidden,
+        },
+    );
+    draw_phase_section(
+        frame,
+        app,
+        transform,
+        PhaseSection {
+            area: areas[1],
+            label: "HP2",
+            color: app.theme.phase_hp2_fg(),
+            rows: &app.cache.pileup_rows[layout.hp2_rows.clone()],
+            hidden_reads: layout.hp2_hidden,
+        },
+    );
+
+    if let Some(unphased_rows) = layout.unphased_rows.as_ref() {
+        draw_phase_section(
+            frame,
+            app,
+            transform,
+            PhaseSection {
+                area: areas[2],
+                label: "Unphased",
+                color: app.theme.phase_unphased_fg(),
+                rows: &app.cache.pileup_rows[unphased_rows.clone()],
+                hidden_reads: layout.unphased_hidden,
+            },
+        );
+    }
+}
+
+struct PhaseSection<'a> {
+    area: Rect,
+    label: &'a str,
+    color: Color,
+    rows: &'a [PileupRow],
+    hidden_reads: usize,
+}
+
+fn draw_phase_section(
+    frame: &mut Frame,
+    app: &App,
+    transform: ViewTransform,
+    section: PhaseSection<'_>,
+) {
+    let PhaseSection {
+        area,
+        label,
+        color,
+        rows,
+        hidden_reads,
+    } = section;
+
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    let read_count = rows.iter().map(Vec::len).sum::<usize>() + hidden_reads;
+    let header = phase_section_header(label, read_count, hidden_reads, area.width as usize);
+    frame.render_widget(
+        Paragraph::new(header).style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Rect { height: 1, ..area },
+    );
+
+    render_reads_track(
+        frame,
+        app,
+        transform,
+        rows,
+        Rect {
+            y: area.y.saturating_add(1),
+            height: area.height.saturating_sub(1),
+            ..area
+        },
+    );
+}
+
+fn phase_section_header(
+    label: &str,
+    read_count: usize,
+    hidden_reads: usize,
+    width: usize,
+) -> String {
+    let noun = if read_count == 1 { "read" } else { "reads" };
+    let hidden = if hidden_reads > 0 {
+        format!("  +{hidden_reads} hidden")
+    } else {
+        String::new()
+    };
+    let prefix = format!(" {label}  {read_count} {noun}{hidden} ");
+    let divider = "─".repeat(width.saturating_sub(prefix.chars().count()));
+    truncate_to_width(&format!("{prefix}{divider}"), width)
+}
+
+fn render_reads_track(
+    frame: &mut Frame,
+    app: &App,
+    transform: ViewTransform,
+    rows: &[PileupRow],
+    area: Rect,
+) {
+    frame.render_widget(
+        ReadsTrack {
+            reads: &app.cache.reads,
+            rows,
+            reference: app.cache.reference.as_ref(),
+            transform,
+            show_names: area.width > 80,
+            expand_insertions: app.expand_insertions,
+            show_methylation: app.show_methylation,
+            show_phasing: app.show_phasing,
+            theme: app.theme,
+        },
+        area,
+    );
+}
+
+fn phase_track_areas(area: Rect, has_unphased: bool) -> [Rect; 3] {
+    let unphased_height = if has_unphased && area.height >= 4 {
+        (area.height / 5).max(2)
+    } else {
+        0
+    };
+    let phased_height = area.height.saturating_sub(unphased_height);
+    let hp1_height = phased_height.div_ceil(2);
+    let hp2_height = phased_height / 2;
+
+    let hp1 = Rect {
+        height: hp1_height,
+        ..area
+    };
+    let hp2 = Rect {
+        y: area.y.saturating_add(hp1_height),
+        height: hp2_height,
+        ..area
+    };
+    let unphased = Rect {
+        y: hp2.y.saturating_add(hp2_height),
+        height: unphased_height,
+        ..area
+    };
+
+    [hp1, hp2, unphased]
+}
+
 fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
     let keys = match app.mode {
         Mode::Normal => {
             if app.gff.is_some() {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  p:phasing  Q:MAPQ  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
             } else {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  p:phasing  Q:MAPQ  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
             }
         }
         Mode::GoTo => " Enter:confirm  Esc:cancel",
@@ -485,7 +648,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         Line::from("  ↓ / -      Zoom out"),
         Line::from("  i          Toggle expanded insertion sequence"),
         Line::from("  m          Toggle read methylation"),
-        Line::from("  p          Toggle phased-read colors"),
+        Line::from("  p          Toggle separated HP1 / HP2 read tracks"),
         Line::from("  Q          Set minimum read MAPQ (0 shows all)"),
         Line::from("  t          Toggle dark/light theme"),
         Line::from("  Tab        Move to next expanded insertion"),
@@ -507,7 +670,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         Line::from("  Read colors:"),
         Line::from("    Phase off: MAPQ uses high / medium / low contrast"),
-        Line::from("    Phase on: HP1 cyan, HP2 magenta, unphased gray"),
+        Line::from("    Phase tracks: HP1 cyan, HP2 magenta, unphased gray"),
         Line::from("    MAPQ remains visible as bold / normal / dim intensity"),
         Line::from(
             "    Reference mismatches use base-colored bold backgrounds when --reference is loaded",
@@ -550,13 +713,13 @@ mod tests {
         assert_eq!(truncate_to_width("abcdef", 1), "~");
         assert_eq!(truncate_to_width("abcdef", 4), "abc~");
         assert_eq!(truncate_to_width("abc", 4), "abc");
+        assert_eq!(truncate_to_width("──", 2), "──");
     }
 
     #[test]
     fn top_bar_preserves_identity_and_mapq_at_terminal_width() {
         let identity = " LOCUS  file:demo.sorted.bam  region:chrDemo:1-154 ";
-        let metrics =
-            " reads:3  mapq>=30  phase:on  scale:2.0 bp/col  ins:collapsed  meth:off  theme:dark ";
+        let metrics = " reads:3  mapq>=30  phase:tracks  scale:2.0 bp/col  ins:collapsed  meth:off  theme:dark ";
         let status = " status:minimum MAPQ set to 30 ";
 
         let (identity, metrics, status) = fit_top_bar(identity, metrics, Some(status), 80);
@@ -564,7 +727,7 @@ mod tests {
 
         assert!(identity.starts_with(" LOCUS"));
         assert!(metrics.contains("mapq>=30"));
-        assert!(metrics.contains("phase:on"));
+        assert!(metrics.contains("phase:tracks"));
         assert!(identity.len() + metrics.len() + status.len() <= 80);
     }
 
@@ -577,7 +740,37 @@ mod tests {
     #[test]
     fn phasing_mode_label_reflects_toggle_state() {
         assert_eq!(phasing_mode_label(false), "phase:off");
-        assert_eq!(phasing_mode_label(true), "phase:on");
+        assert_eq!(phasing_mode_label(true), "phase:tracks");
+    }
+
+    #[test]
+    fn phase_track_areas_are_contiguous_and_bounded() {
+        let area = Rect::new(7, 11, 80, 15);
+        let [hp1, hp2, unphased] = phase_track_areas(area, true);
+
+        assert_eq!(hp1, Rect::new(7, 11, 80, 6));
+        assert_eq!(hp2, Rect::new(7, 17, 80, 6));
+        assert_eq!(unphased, Rect::new(7, 23, 80, 3));
+        assert_eq!(unphased.y + unphased.height, area.y + area.height);
+    }
+
+    #[test]
+    fn phase_track_areas_split_only_haplotypes_without_unphased_reads() {
+        let area = Rect::new(2, 3, 40, 7);
+        let [hp1, hp2, unphased] = phase_track_areas(area, false);
+
+        assert_eq!(hp1, Rect::new(2, 3, 40, 4));
+        assert_eq!(hp2, Rect::new(2, 7, 40, 3));
+        assert_eq!(unphased, Rect::new(2, 10, 40, 0));
+    }
+
+    #[test]
+    fn phase_section_header_reports_group_and_hidden_reads() {
+        let header = phase_section_header("HP1", 4, 2, 30);
+
+        assert!(header.starts_with(" HP1  4 reads  +2 hidden "));
+        assert_eq!(header.chars().count(), 30);
+        assert!(phase_section_header("HP2", 1, 0, 20).starts_with(" HP2  1 read "));
     }
 
     #[test]
