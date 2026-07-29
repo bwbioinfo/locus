@@ -1,7 +1,12 @@
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
-use crate::app::{App, Mode};
+use crate::{
+    app::{App, Mode},
+    ui,
+};
 
 pub fn handle_events(app: &mut App) -> Result<bool> {
     if !event::poll(std::time::Duration::from_millis(100))? {
@@ -10,6 +15,7 @@ pub fn handle_events(app: &mut App) -> Result<bool> {
 
     match event::read()? {
         Event::Key(key) => dispatch(app, key)?,
+        Event::Mouse(mouse) => handle_mouse(app, mouse),
         Event::Resize(cols, rows) => {
             app.terminal_cols = cols;
             app.terminal_rows = rows;
@@ -19,6 +25,19 @@ pub fn handle_events(app: &mut App) -> Result<bool> {
     }
 
     Ok(!app.should_quit)
+}
+
+fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    if app.mode != Mode::Normal || app.show_help {
+        return;
+    }
+    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return;
+    }
+
+    if let Some(position) = ui::genomic_position_at(app, mouse.column, mouse.row) {
+        app.select_reference_position(position);
+    }
 }
 
 fn dispatch(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -214,5 +233,51 @@ mod tests {
 
         assert!(app.show_phasing);
         assert!(!app.needs_fetch);
+    }
+
+    #[test]
+    fn left_click_selects_a_genomic_position_without_refetching() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 80;
+        app.terminal_rows = 24;
+        app.needs_fetch = false;
+        let expected = ui::genomic_position_at(&app, 20, 6).expect("canvas position");
+
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 20,
+                row: 6,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+
+        assert_eq!(app.selected_ref_pos, Some(expected));
+        assert!(!app.needs_fetch);
+    }
+
+    #[test]
+    fn mouse_clicks_ignore_chrome_and_overlays() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 80;
+        app.terminal_rows = 24;
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 20,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, click);
+        assert!(app.selected_ref_pos.is_none());
+
+        app.show_help = true;
+        handle_mouse(&mut app, MouseEvent { row: 6, ..click });
+        assert!(app.selected_ref_pos.is_none());
     }
 }

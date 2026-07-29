@@ -35,6 +35,40 @@ pub struct ReadsTrack<'a> {
     pub theme: Theme,
 }
 
+/// Adds a non-destructive visual marker to occupied read cells at a selected position.
+pub struct SelectedPositionOverlay {
+    pub selected_ref_pos: Option<u64>,
+    pub transform: ViewTransform,
+}
+
+impl Widget for SelectedPositionOverlay {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let Some(selected_ref_pos) = self.selected_ref_pos else {
+            return;
+        };
+        let Some(col) = self.transform.bp_to_col(selected_ref_pos) else {
+            return;
+        };
+        let x = area.x.saturating_add(col);
+        if x >= area.x.saturating_add(area.width) {
+            return;
+        }
+
+        for y in area.y..area.y.saturating_add(area.height) {
+            let Some(cell) = buf.cell_mut((x, y)) else {
+                continue;
+            };
+            if cell.symbol().trim().is_empty() {
+                continue;
+            }
+            let style = cell
+                .style()
+                .add_modifier(Modifier::REVERSED | Modifier::UNDERLINED);
+            cell.set_style(style);
+        }
+    }
+}
+
 impl<'a> Widget for ReadsTrack<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.height == 0 || area.width == 0 {
@@ -750,6 +784,32 @@ mod tests {
         assert!(bases_mismatch(b'A', b'C'));
         assert!(!bases_mismatch(b'N', b'A'));
         assert!(!bases_mismatch(b'A', b'N'));
+    }
+
+    #[test]
+    fn selected_position_overlay_marks_only_occupied_read_cells() {
+        let area = Rect::new(0, 0, 4, 2);
+        let transform = ViewTransform::new(100, 104, 4);
+        let mut buf = Buffer::empty(area);
+        buf[(2, 0)]
+            .set_char('A')
+            .set_style(Style::default().fg(Color::Green));
+
+        SelectedPositionOverlay {
+            selected_ref_pos: Some(102),
+            transform,
+        }
+        .render(area, &mut buf);
+
+        assert!(
+            buf[(2, 0)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED | Modifier::UNDERLINED)
+        );
+        assert_eq!(buf[(2, 0)].style().fg, Some(Color::Green));
+        assert!(buf[(2, 1)].symbol().trim().is_empty());
+        assert!(buf[(2, 1)].style().add_modifier.is_empty());
     }
 
     #[test]

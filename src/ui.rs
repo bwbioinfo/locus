@@ -7,8 +7,12 @@ use ratatui::{
 };
 
 use crate::render::{
-    ViewTransform, coverage::CoverageTrack, features::FeaturesTrack, reads::ReadsTrack,
-    reference::ReferenceTrack, ruler::Ruler,
+    ViewTransform,
+    coverage::CoverageTrack,
+    features::FeaturesTrack,
+    reads::{ReadsTrack, SelectedPositionOverlay},
+    reference::ReferenceTrack,
+    ruler::Ruler,
 };
 use crate::{
     app::{App, Mode},
@@ -17,19 +21,11 @@ use crate::{
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
+    let [top_bar, main, bottom_bar] = browser_layout(area);
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(5),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-    draw_top_bar(frame, app, chunks[0]);
-    draw_main(frame, app, chunks[1]);
-    draw_bottom_bar(frame, app, chunks[2]);
+    draw_top_bar(frame, app, top_bar);
+    draw_main(frame, app, main);
+    draw_bottom_bar(frame, app, bottom_bar);
 
     // Overlays (drawn on top)
     if app.show_help || app.mode == Mode::Help {
@@ -47,6 +43,33 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.mode == Mode::MapqFilter {
         draw_mapq_filter_overlay(frame, app, area);
     }
+}
+
+fn browser_layout(area: Rect) -> [Rect; 3] {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(5),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    [chunks[0], chunks[1], chunks[2]]
+}
+
+/// Return the genomic position under a terminal click in the main browser canvas.
+pub(crate) fn genomic_position_at(app: &App, column: u16, row: u16) -> Option<u64> {
+    let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+    if column < main.x
+        || column >= main.x.saturating_add(main.width)
+        || row < main.y
+        || row >= main.y.saturating_add(main.height)
+    {
+        return None;
+    }
+
+    genomic_transform(app, main).col_to_bp(column.saturating_sub(main.x))
 }
 
 fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -72,8 +95,11 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     let phasing_mode = phasing_mode_label(app.show_phasing);
     let theme_mode = theme_mode_label(app.theme);
     let mapq_filter = mapq_filter_label(app.min_mapq);
+    let selected_position = selected_position_label(app.current_contig(), app.selected_ref_pos)
+        .map(|position| format!(" pos:{position}"))
+        .unwrap_or_default();
     let metrics = format!(
-        " reads:{}  {}  {}  scale:{:.1} bp/col  {}  {}  {} ",
+        "{selected_position}  reads:{}  {}  {}  scale:{:.1} bp/col  {}  {}  {} ",
         read_count,
         mapq_filter,
         phasing_mode,
@@ -143,6 +169,10 @@ fn mapq_filter_label(min_mapq: u8) -> String {
     }
 }
 
+fn selected_position_label(contig: &str, selected_ref_pos: Option<u64>) -> Option<String> {
+    selected_ref_pos.map(|position| format!("{contig}:{}", position + 1))
+}
+
 fn truncate_to_width(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
         return text.to_string();
@@ -188,10 +218,7 @@ fn format_region_display(app: &App) -> String {
 }
 
 fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
-    let base_transform =
-        ViewTransform::new(app.view_start, app.view_end, area.width.saturating_sub(2));
-    let insertion_gap = app.selected_insertion_gap(&base_transform);
-    let transform = base_transform.with_insertion_gap(insertion_gap);
+    let transform = genomic_transform(app, area);
 
     let ruler_h = 2u16;
     let reference_h: u16 = if app.reference.is_some() { 1 } else { 0 };
@@ -270,6 +297,12 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         draw_standard_pileup(frame, app, transform, reads_area);
     }
+}
+
+fn genomic_transform(app: &App, area: Rect) -> ViewTransform {
+    let base_transform =
+        ViewTransform::new(app.view_start, app.view_end, area.width.saturating_sub(2));
+    base_transform.with_insertion_gap(app.selected_insertion_gap(&base_transform))
 }
 
 fn draw_standard_pileup(frame: &mut Frame, app: &App, transform: ViewTransform, area: Rect) {
@@ -420,6 +453,13 @@ fn render_reads_track(
             show_methylation: app.show_methylation,
             show_phasing: app.show_phasing,
             theme: app.theme,
+        },
+        area,
+    );
+    frame.render_widget(
+        SelectedPositionOverlay {
+            selected_ref_pos: app.selected_ref_pos,
+            transform,
         },
         area,
     );
@@ -646,6 +686,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         Line::from("  L          Pan right (large)"),
         Line::from("  ↑ / + / =  Zoom in"),
         Line::from("  ↓ / -      Zoom out"),
+        Line::from("  Left click Select genomic position and highlight read bases"),
         Line::from("  i          Toggle expanded insertion sequence"),
         Line::from("  m          Toggle read methylation"),
         Line::from("  p          Toggle separated HP1 / HP2 read tracks"),
@@ -705,7 +746,10 @@ fn centered_rect(pct_x: u16, pct_y: u16, r: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+    use crate::{bam::BamSource, region::Region, theme::Theme};
 
     #[test]
     fn truncate_to_width_respects_small_widths() {
@@ -789,5 +833,52 @@ mod tests {
     fn mapq_filter_label_reflects_threshold() {
         assert_eq!(mapq_filter_label(0), "mapq:all");
         assert_eq!(mapq_filter_label(30), "mapq>=30");
+    }
+
+    #[test]
+    fn selected_position_label_is_one_based_and_includes_the_contig() {
+        assert_eq!(
+            selected_position_label("chrDemo", Some(64)),
+            Some("chrDemo:65".to_string())
+        );
+        assert_eq!(selected_position_label("chrDemo", None), None);
+    }
+
+    #[test]
+    fn browser_layout_reserves_the_top_and_bottom_bars() {
+        let [top, main, bottom] = browser_layout(Rect::new(0, 0, 80, 24));
+
+        assert_eq!(top, Rect::new(0, 0, 80, 1));
+        assert_eq!(main, Rect::new(0, 1, 80, 22));
+        assert_eq!(bottom, Rect::new(0, 23, 80, 1));
+    }
+
+    #[test]
+    fn insertion_gap_clicks_resolve_to_the_anchor_position() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 110;
+        app.terminal_rows = 20;
+        app.jump_to_region(&Region::new("chrDemo", 44, 115))
+            .expect("set demo region");
+        app.refresh().expect("load demo reads");
+        app.expand_insertions = true;
+        app.cycle_insertion_expansion(true);
+        let anchor = app.selected_insertion_ref_pos.expect("selected insertion");
+        let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let transform = genomic_transform(&app, main);
+        let (left_border, right_border) = transform
+            .insertion_border_cols(anchor)
+            .expect("visible insertion gap");
+
+        assert_eq!(
+            genomic_position_at(&app, main.x + left_border, main.y),
+            Some(anchor)
+        );
+        assert_eq!(
+            genomic_position_at(&app, main.x + right_border, main.y),
+            Some(anchor)
+        );
     }
 }
