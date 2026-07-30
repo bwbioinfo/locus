@@ -1,9 +1,12 @@
+use std::collections::BTreeMap;
+
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap},
 };
 
 use crate::render::{
@@ -16,7 +19,7 @@ use crate::render::{
 };
 use crate::{
     app::{App, Mode},
-    cache::{PhasePileupLayout, PileupRow},
+    cache::{PhasePileupLayout, PileupRow, RenderRead},
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -341,6 +344,7 @@ fn draw_phased_pileup(
             color: app.theme.phase_hp1_fg(),
             rows: &app.cache.pileup_rows[layout.hp1_rows.clone()],
             hidden_reads: layout.hp1_hidden,
+            show_phase_set_boundaries: true,
         },
     );
     draw_phase_section(
@@ -353,6 +357,7 @@ fn draw_phased_pileup(
             color: app.theme.phase_hp2_fg(),
             rows: &app.cache.pileup_rows[layout.hp2_rows.clone()],
             hidden_reads: layout.hp2_hidden,
+            show_phase_set_boundaries: true,
         },
     );
 
@@ -367,6 +372,7 @@ fn draw_phased_pileup(
                 color: app.theme.phase_unphased_fg(),
                 rows: &app.cache.pileup_rows[unphased_rows.clone()],
                 hidden_reads: layout.unphased_hidden,
+                show_phase_set_boundaries: false,
             },
         );
     }
@@ -378,6 +384,7 @@ struct PhaseSection<'a> {
     color: Color,
     rows: &'a [PileupRow],
     hidden_reads: usize,
+    show_phase_set_boundaries: bool,
 }
 
 fn draw_phase_section(
@@ -392,37 +399,162 @@ fn draw_phase_section(
         color,
         rows,
         hidden_reads,
+        show_phase_set_boundaries,
     } = section;
 
     if area.height == 0 || area.width == 0 {
         return;
     }
 
+    let phase_sets = if show_phase_set_boundaries {
+        phase_set_boundaries(&app.cache.reads, rows)
+    } else {
+        Vec::new()
+    };
     let read_count = rows.iter().map(Vec::len).sum::<usize>() + hidden_reads;
-    let header = phase_section_header(label, read_count, hidden_reads, area.width as usize);
+    let header = phase_section_header(
+        label,
+        read_count,
+        hidden_reads,
+        &phase_sets,
+        area.width as usize,
+    );
     frame.render_widget(
         Paragraph::new(header).style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
         Rect { height: 1, ..area },
     );
 
-    render_reads_track(
+    render_phase_set_header_labels(
         frame,
-        app,
         transform,
-        rows,
-        Rect {
-            y: area.y.saturating_add(1),
-            height: area.height.saturating_sub(1),
-            ..area
+        &phase_sets,
+        color,
+        area,
+        phase_section_prefix(label, read_count, hidden_reads, &phase_sets)
+            .chars()
+            .count(),
+    );
+
+    let reads_area = Rect {
+        y: area.y.saturating_add(1),
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    render_reads_track(frame, app, transform, rows, reads_area);
+    frame.render_widget(
+        PhaseSetBoundaryOverlay {
+            boundaries: &phase_sets,
+            transform,
+            color,
         },
+        reads_area,
     );
 }
 
-fn phase_section_header(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PhaseSetBoundary {
+    id: u32,
+    start: u64,
+}
+
+fn phase_set_boundaries(reads: &[RenderRead], rows: &[PileupRow]) -> Vec<PhaseSetBoundary> {
+    let mut starts = BTreeMap::new();
+
+    for row in rows {
+        for &read_idx in row {
+            let Some(read) = reads.get(read_idx) else {
+                continue;
+            };
+            let Some(id) = read.phase.phase_set else {
+                continue;
+            };
+            starts
+                .entry(id)
+                .and_modify(|start: &mut u64| *start = (*start).min(read.start))
+                .or_insert(read.start);
+        }
+    }
+
+    let mut boundaries = starts
+        .into_iter()
+        .map(|(id, start)| PhaseSetBoundary { id, start })
+        .collect::<Vec<_>>();
+    boundaries.sort_by_key(|boundary| (boundary.start, boundary.id));
+    boundaries
+}
+
+struct PhaseSetBoundaryOverlay<'a> {
+    boundaries: &'a [PhaseSetBoundary],
+    transform: ViewTransform,
+    color: Color,
+}
+
+impl Widget for PhaseSetBoundaryOverlay<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        for boundary in self.boundaries {
+            let Some(col) = self.transform.bp_to_col(boundary.start) else {
+                continue;
+            };
+            let x = area.x.saturating_add(col);
+            if x >= area.x.saturating_add(area.width) {
+                continue;
+            }
+
+            for y in area.y..area.y.saturating_add(area.height) {
+                let Some(cell) = buf.cell_mut((x, y)) else {
+                    continue;
+                };
+                if cell.symbol().trim().is_empty() {
+                    cell.set_symbol("┊");
+                    cell.set_style(Style::default().fg(self.color).add_modifier(Modifier::DIM));
+                } else {
+                    cell.set_style(cell.style().add_modifier(Modifier::UNDERLINED));
+                }
+            }
+        }
+    }
+}
+
+fn render_phase_set_header_labels(
+    frame: &mut Frame,
+    transform: ViewTransform,
+    boundaries: &[PhaseSetBoundary],
+    color: Color,
+    area: Rect,
+    prefix_width: usize,
+) {
+    let mut previous_end = area.x.saturating_add(prefix_width as u16);
+    let area_end = area.x.saturating_add(area.width);
+
+    for boundary in boundaries {
+        let Some(col) = transform.bp_to_col(boundary.start) else {
+            continue;
+        };
+        let label = format!(" PS:{} ", boundary.id);
+        let label_width = label.chars().count() as u16;
+        let x = area.x.saturating_add(col);
+        if x < previous_end || x.saturating_add(label_width) > area_end {
+            continue;
+        }
+
+        frame.render_widget(
+            Paragraph::new(label).style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Rect {
+                x,
+                y: area.y,
+                width: label_width,
+                height: 1,
+            },
+        );
+        previous_end = x.saturating_add(label_width);
+    }
+}
+
+fn phase_section_prefix(
     label: &str,
     read_count: usize,
     hidden_reads: usize,
-    width: usize,
+    phase_sets: &[PhaseSetBoundary],
 ) -> String {
     let noun = if read_count == 1 { "read" } else { "reads" };
     let hidden = if hidden_reads > 0 {
@@ -430,7 +562,22 @@ fn phase_section_header(
     } else {
         String::new()
     };
-    let prefix = format!(" {label}  {read_count} {noun}{hidden} ");
+    let phase_sets = match phase_sets {
+        [] => String::new(),
+        [first] => format!("  PS:{}", first.id),
+        [first, remaining @ ..] => format!("  PS:{} +{}", first.id, remaining.len()),
+    };
+    format!(" {label}  {read_count} {noun}{hidden}{phase_sets} ")
+}
+
+fn phase_section_header(
+    label: &str,
+    read_count: usize,
+    hidden_reads: usize,
+    phase_sets: &[PhaseSetBoundary],
+    width: usize,
+) -> String {
+    let prefix = phase_section_prefix(label, read_count, hidden_reads, phase_sets);
     let divider = "─".repeat(width.saturating_sub(prefix.chars().count()));
     truncate_to_width(&format!("{prefix}{divider}"), width)
 }
@@ -763,8 +910,33 @@ mod tests {
 
     use super::*;
     use crate::{
-        bam::BamSource, gff::GffStore, reference::ReferenceStore, region::Region, theme::Theme,
+        bam::BamSource,
+        cache::{CigarOp, ReadPhase, Strand},
+        gff::GffStore,
+        reference::ReferenceStore,
+        region::Region,
+        theme::Theme,
     };
+
+    fn phase_read(name: &str, start: u64, phase_set: Option<u32>) -> RenderRead {
+        RenderRead {
+            name: name.to_string(),
+            start,
+            end: start + 10,
+            strand: Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![CigarOp::Match(10)],
+            sequence: b"AAAAAAAAAA".to_vec(),
+            methylation: Vec::new(),
+            phase: ReadPhase {
+                haplotype: Some(1),
+                phase_set,
+            },
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        }
+    }
 
     #[test]
     fn truncate_to_width_respects_small_widths() {
@@ -845,6 +1017,55 @@ mod tests {
     }
 
     #[test]
+    fn phase_set_boundaries_are_sorted_deduplicated_and_ignore_missing_tags() {
+        let reads = vec![
+            phase_read("ps-100", 80, Some(100)),
+            phase_read("ps-50", 50, Some(50)),
+            phase_read("ps-100-earlier", 70, Some(100)),
+            phase_read("untagged", 90, None),
+        ];
+
+        assert_eq!(
+            phase_set_boundaries(&reads, &[vec![0, 1], vec![2, 3]]),
+            vec![
+                PhaseSetBoundary { id: 50, start: 50 },
+                PhaseSetBoundary { id: 100, start: 70 },
+            ]
+        );
+    }
+
+    #[test]
+    fn phase_set_boundary_overlay_marks_empty_cells_without_replacing_bases() {
+        let area = Rect::new(0, 0, 4, 2);
+        let transform = ViewTransform::new(100, 104, 4);
+        let mut buffer = Buffer::empty(area);
+        buffer[(1, 0)]
+            .set_char('A')
+            .set_style(Style::default().fg(Color::Green));
+
+        PhaseSetBoundaryOverlay {
+            boundaries: &[PhaseSetBoundary {
+                id: 101,
+                start: 101,
+            }],
+            transform,
+            color: Color::Cyan,
+        }
+        .render(area, &mut buffer);
+
+        assert_eq!(buffer[(1, 0)].symbol(), "A");
+        assert_eq!(buffer[(1, 0)].style().fg, Some(Color::Green));
+        assert!(
+            buffer[(1, 0)]
+                .style()
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
+        );
+        assert_eq!(buffer[(1, 1)].symbol(), "┊");
+        assert_eq!(buffer[(1, 1)].style().fg, Some(Color::Cyan));
+    }
+
+    #[test]
     fn rendered_phase_sections_follow_their_packed_rows() {
         let demo_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo");
         let source = BamSource::open(demo_dir.join("demo.sorted.bam")).expect("open demo BAM");
@@ -886,7 +1107,7 @@ mod tests {
             .collect::<Vec<_>>();
         let hp1 = lines
             .iter()
-            .position(|line| line.contains("HP1  1 read"))
+            .position(|line| line.contains("HP1  2 reads  PS:50 +1"))
             .expect("HP1 header");
         let hp2 = lines
             .iter()
@@ -899,15 +1120,23 @@ mod tests {
 
         assert_eq!(hp2, hp1 + 2);
         assert_eq!(unphased, hp2 + 2);
+        assert!(lines[hp1].contains("PS:100"));
     }
 
     #[test]
     fn phase_section_header_reports_group_and_hidden_reads() {
-        let header = phase_section_header("HP1", 4, 2, 30);
+        let phase_sets = [
+            PhaseSetBoundary { id: 50, start: 50 },
+            PhaseSetBoundary {
+                id: 100,
+                start: 100,
+            },
+        ];
+        let header = phase_section_header("HP1", 4, 2, &phase_sets, 40);
 
-        assert!(header.starts_with(" HP1  4 reads  +2 hidden "));
-        assert_eq!(header.chars().count(), 30);
-        assert!(phase_section_header("HP2", 1, 0, 20).starts_with(" HP2  1 read "));
+        assert!(header.starts_with(" HP1  4 reads  +2 hidden  PS:50 +1 "));
+        assert_eq!(header.chars().count(), 40);
+        assert!(phase_section_header("HP2", 1, 0, &[], 20).starts_with(" HP2  1 read "));
     }
 
     #[test]

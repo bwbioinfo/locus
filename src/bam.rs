@@ -401,6 +401,13 @@ mod tests {
                 phase_set: Some(50),
             }
         );
+        assert_eq!(
+            phase_for("read_hp1_ps100"),
+            ReadPhase {
+                haplotype: Some(1),
+                phase_set: Some(100),
+            }
+        );
         assert_eq!(phase_for("read_reverse_meth"), ReadPhase::default());
         assert_eq!(phase_for("read_bad_phase"), ReadPhase::default());
     }

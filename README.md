@@ -155,13 +155,14 @@ Position selection:
 Phased-read display:
 - Press `p` to switch between the combined pileup and separate haplotype tracks parsed from integer `HP` and `PS` BAM tags. The separated display is off by default.
 - HP1 and HP2 reads are independently coordinate-packed into labeled cyan and magenta tracks against the same reference coordinates.
+- Each phased track labels the visible `PS` blocks and marks their observed starts with a same-color rail; a boundary underlines an aligned base rather than replacing it.
 - Untagged reads, malformed tags, and haplotypes other than HP1/HP2 remain visible in a smaller neutral `Unphased` section.
 - Both dark and light themes use separate readable palettes.
 - MAPQ remains visible within each haplotype color: high-quality reads are bold, medium-quality reads use normal intensity, and reads below MAPQ 30 are dim.
 - Mismatch, insertion, deletion, and methylation styles override the phase background where they occur.
-- Coverage continues to include all reads that pass the MAPQ filter. `PS` values remain available in the render model for future phase-set-aware interactions.
+- Coverage continues to include all reads that pass the MAPQ filter. Reads without a valid `PS` tag remain visible but do not create a phase-set boundary.
 
-The demo BAM includes HP1, HP2, untagged, and malformed-tag reads so the fallback behavior is visible and testable.
+The demo BAM includes HP1 reads from two phase sets, HP2, untagged, and malformed-tag reads so the boundary and fallback behavior are visible and testable.
 
 Theme display:
 - Use `--light` to start with the light palette.
