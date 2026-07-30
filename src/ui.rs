@@ -124,20 +124,19 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     let phasing_mode = phasing_mode_label(app.show_phasing);
     let theme_mode = theme_mode_label(app.theme);
     let mapq_filter = mapq_filter_label(app.min_mapq);
-    let selected_position = selected_position_label(app.current_contig(), app.selected_ref_pos)
-        .map(|position| {
+    let selected_info =
+        selected_position_label(app.current_contig(), app.selected_ref_pos).map(|position| {
             let tally = app
                 .selected_allele_tally
                 .as_ref()
                 .map(selected_allele_tally_label)
                 .unwrap_or_else(|| "alleles:none".to_string());
-            format!(" pos:{position} {tally}")
-        })
-        .unwrap_or_default();
+            format!(" SELECTED {position}  {tally} ")
+        });
     let metrics = format!(
-        "{selected_position}  reads:{}  {}  {}  scale:{:.1} bp/col  {}  {}  {} ",
-        read_count,
+        " {}  reads:{}  {}  scale:{:.1} bp/col  {}  {}  {} ",
         mapq_filter,
+        read_count,
         phasing_mode,
         bp_per_col,
         insertion_mode,
@@ -145,21 +144,43 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         theme_mode
     );
     let status = app.status_msg.as_ref().map(|msg| format!(" status:{msg} "));
-    let (identity, metrics, status) = fit_top_bar(&identity, &metrics, status.as_deref(), width);
+    let (identity, selected_info, metrics, status) = fit_top_bar(
+        &identity,
+        selected_info.as_deref(),
+        &metrics,
+        status.as_deref(),
+        width,
+    );
 
-    let used = identity.len() + metrics.len() + status.as_ref().map_or(0, |s| s.len());
+    let used = identity.len()
+        + selected_info.as_ref().map_or(0, String::len)
+        + metrics.len()
+        + status.as_ref().map_or(0, String::len);
     let pad_len = width.saturating_sub(used);
 
-    let mut spans = vec![
-        Span::styled(
-            identity,
+    let mut spans = vec![Span::styled(
+        identity,
+        Style::default()
+            .fg(app.theme.top_bar_identity_fg())
+            .bg(app.theme.top_bar_identity_bg())
+            .add_modifier(Modifier::BOLD),
+    )];
+
+    if let Some(selected_info) = selected_info {
+        spans.push(Span::styled(
+            selected_info,
             Style::default()
-                .fg(app.theme.brand_fg())
+                .fg(app.theme.selected_info_fg())
+                .bg(app.theme.selected_info_bg())
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" ".repeat(pad_len)),
-        Span::styled(metrics, Style::default().fg(app.theme.chrome_fg())),
-    ];
+        ));
+    }
+
+    spans.push(Span::raw(" ".repeat(pad_len)));
+    spans.push(Span::styled(
+        metrics,
+        Style::default().fg(app.theme.top_bar_fg()),
+    ));
 
     if let Some(status) = status {
         spans.push(Span::styled(
@@ -169,7 +190,7 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(app.theme.chrome_bg())),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(app.theme.top_bar_bg())),
         area,
     );
 }
@@ -256,23 +277,40 @@ fn truncate_to_width(text: &str, width: usize) -> String {
 
 fn fit_top_bar(
     identity: &str,
+    selected_info: Option<&str>,
     metrics: &str,
     status: Option<&str>,
     width: usize,
-) -> (String, String, Option<String>) {
+) -> (String, Option<String>, String, Option<String>) {
     if width == 0 {
-        return (String::new(), String::new(), status.map(|_| String::new()));
+        return (
+            String::new(),
+            selected_info.map(|_| String::new()),
+            String::new(),
+            status.map(|_| String::new()),
+        );
     }
 
     let identity_budget = if width < 40 { width / 2 } else { width * 2 / 5 };
     let identity = truncate_to_width(identity, identity_budget.max(1).min(width));
     let remaining = width.saturating_sub(identity.len());
+
+    if let Some(selected_info) = selected_info {
+        let metrics_reserve = (remaining / 5).min(metrics.len());
+        let selected_info = truncate_to_width(selected_info, remaining - metrics_reserve);
+        let metrics = truncate_to_width(
+            metrics,
+            width.saturating_sub(identity.len() + selected_info.len()),
+        );
+        return (identity, Some(selected_info), metrics, None);
+    }
+
     let status_reserve = status.map_or(0, |text| (remaining / 4).min(text.len()));
     let metrics = truncate_to_width(metrics, remaining.saturating_sub(status_reserve));
     let status = status
         .map(|text| truncate_to_width(text, width.saturating_sub(identity.len() + metrics.len())));
 
-    (identity, metrics, status)
+    (identity, None, metrics, status)
 }
 
 fn format_region_display(app: &App) -> String {
@@ -1018,13 +1056,38 @@ mod tests {
         let metrics = " reads:3  mapq>=30  phase:tracks  scale:2.0 bp/col  ins:collapsed  meth:off  theme:dark ";
         let status = " status:minimum MAPQ set to 30 ";
 
-        let (identity, metrics, status) = fit_top_bar(identity, metrics, Some(status), 80);
+        let (identity, selected_info, metrics, status) =
+            fit_top_bar(identity, None, metrics, Some(status), 80);
         let status = status.expect("status remains present");
 
         assert!(identity.starts_with(" LOCUS"));
+        assert!(selected_info.is_none());
         assert!(metrics.contains("mapq>=30"));
         assert!(metrics.contains("phase:tracks"));
         assert!(identity.len() + metrics.len() + status.len() <= 80);
+    }
+
+    #[test]
+    fn top_bar_prioritizes_selected_information_and_mapq() {
+        let identity = " LOCUS  file:demo.sorted.bam  region:chrDemo:45-115 ";
+        let selected_info = " SELECTED chrDemo:60  alleles:C:2 T:2 +GGGG:1 ";
+        let metrics = " mapq:all  reads:7  phase:tracks  scale:0.7 bp/col ";
+
+        let (identity, selected_info, metrics, status) = fit_top_bar(
+            identity,
+            Some(selected_info),
+            metrics,
+            Some(" status:ignored "),
+            110,
+        );
+        let selected_info = selected_info.expect("selection remains visible");
+
+        assert!(identity.starts_with(" LOCUS"));
+        assert!(selected_info.contains("SELECTED chrDemo:60"));
+        assert!(selected_info.contains("+GGGG:1"));
+        assert!(metrics.contains("mapq:all"));
+        assert!(status.is_none());
+        assert!(identity.len() + selected_info.len() + metrics.len() <= 110);
     }
 
     #[test]
