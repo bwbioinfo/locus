@@ -221,11 +221,17 @@ impl RegionCache {
         let has_unphased = !unphased.is_empty();
         let header_rows = 2 + usize::from(has_unphased);
         let row_budget = max_height.saturating_sub(header_rows);
-        let (hp1_limit, hp2_limit, unphased_limit) = phase_row_limits(row_budget, has_unphased);
-
-        let hp1_rows = pack_reads(&hp1, &self.reads, hp1_limit);
-        let hp2_rows = pack_reads(&hp2, &self.reads, hp2_limit);
-        let unphased_rows = pack_reads(&unphased, &self.reads, unphased_limit);
+        let mut hp1_rows = pack_reads(&hp1, &self.reads, row_budget);
+        let mut hp2_rows = pack_reads(&hp2, &self.reads, row_budget);
+        let mut unphased_rows = pack_reads(&unphased, &self.reads, row_budget);
+        let (hp1_limit, hp2_limit, unphased_limit) = reclaim_unused_phase_rows(
+            row_budget,
+            [hp1_rows.len(), hp2_rows.len(), unphased_rows.len()],
+            has_unphased,
+        );
+        hp1_rows.truncate(hp1_limit);
+        hp2_rows.truncate(hp2_limit);
+        unphased_rows.truncate(unphased_limit);
 
         let hp1_hidden = hidden_read_count(&hp1, &hp1_rows);
         let hp2_hidden = hidden_read_count(&hp2, &hp2_rows);
@@ -269,6 +275,39 @@ fn phase_row_limits(total_rows: usize, has_unphased: bool) -> (usize, usize, usi
     let unphased_rows = (total_rows / 5).max(1);
     let phased_rows = total_rows - unphased_rows;
     (phased_rows.div_ceil(2), phased_rows / 2, unphased_rows)
+}
+
+fn reclaim_unused_phase_rows(
+    total_rows: usize,
+    required_rows: [usize; 3],
+    has_unphased: bool,
+) -> (usize, usize, usize) {
+    let (hp1, hp2, unphased) = phase_row_limits(total_rows, has_unphased);
+    let mut limits = [hp1, hp2, unphased];
+    for (limit, required) in limits.iter_mut().zip(required_rows) {
+        *limit = (*limit).min(required);
+    }
+
+    let mut remaining = total_rows.saturating_sub(limits.into_iter().sum::<usize>());
+    while remaining > 0 {
+        let mut assigned = false;
+        for idx in 0..limits.len() {
+            if limits[idx] >= required_rows[idx] {
+                continue;
+            }
+            limits[idx] += 1;
+            remaining -= 1;
+            assigned = true;
+            if remaining == 0 {
+                break;
+            }
+        }
+        if !assigned {
+            break;
+        }
+    }
+
+    (limits[0], limits[1], limits[2])
 }
 
 /// Greedy row-packing: sort reads by start, assign each to the first row where it fits.
@@ -489,12 +528,47 @@ mod tests {
     }
 
     #[test]
+    fn phased_pileup_reclaims_spare_rows_before_hiding_reads() {
+        let visible = Region::new("chr1", 0, 100);
+        let mut hp1_a = make_read("hp1-a", 0, 100);
+        hp1_a.phase.haplotype = Some(1);
+        let mut hp1_b = make_read("hp1-b", 0, 100);
+        hp1_b.phase.haplotype = Some(1);
+        let mut hp1_c = make_read("hp1-c", 0, 100);
+        hp1_c.phase.haplotype = Some(1);
+        let mut hp2 = make_read("hp2", 0, 100);
+        hp2.phase.haplotype = Some(2);
+        let unphased = make_read("unphased", 0, 100);
+        let mut cache = RegionCache {
+            reads: vec![hp1_a, hp1_b, hp1_c, hp2, unphased],
+            ..RegionCache::default()
+        };
+
+        cache.layout_pileup(&visible, 8, 0, true);
+
+        let layout = cache.phase_layout.as_ref().expect("phase layout");
+        assert_eq!(layout.hp1_rows, 0..3);
+        assert_eq!(layout.hp2_rows, 3..4);
+        assert_eq!(layout.unphased_rows, Some(4..5));
+        assert_eq!(layout.hp1_hidden, 0);
+        assert_eq!(layout.hp2_hidden, 0);
+        assert_eq!(layout.unphased_hidden, 0);
+        assert_eq!(cache.hidden_reads, 0);
+    }
+
+    #[test]
     fn phase_row_limits_prioritize_both_haplotypes_in_tight_views() {
         assert_eq!(phase_row_limits(0, true), (0, 0, 0));
         assert_eq!(phase_row_limits(1, true), (1, 0, 0));
         assert_eq!(phase_row_limits(2, true), (1, 1, 0));
         assert_eq!(phase_row_limits(6, true), (3, 2, 1));
         assert_eq!(phase_row_limits(6, false), (3, 3, 0));
+    }
+
+    #[test]
+    fn reclaim_unused_phase_rows_uses_every_available_row() {
+        assert_eq!(reclaim_unused_phase_rows(5, [3, 1, 1], true), (3, 1, 1));
+        assert_eq!(reclaim_unused_phase_rows(6, [4, 1, 1], true), (4, 1, 1));
     }
 
     fn methylated_call(read_pos: usize) -> ModifiedBaseCall {

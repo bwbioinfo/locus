@@ -61,6 +61,32 @@ fn browser_layout(area: Rect) -> [Rect; 3] {
     [chunks[0], chunks[1], chunks[2]]
 }
 
+const RULER_HEIGHT: u16 = 2;
+const REFERENCE_HEIGHT: u16 = 1;
+const FEATURES_HEIGHT: u16 = 4;
+const MAX_COVERAGE_HEIGHT: u16 = 3;
+
+fn coverage_height(main_height: u16) -> u16 {
+    MAX_COVERAGE_HEIGHT.min(main_height / 5)
+}
+
+fn read_area_height(main_height: u16, has_reference: bool, has_features: bool) -> u16 {
+    let fixed_height = RULER_HEIGHT
+        .saturating_add(coverage_height(main_height))
+        .saturating_add(if has_reference { REFERENCE_HEIGHT } else { 0 })
+        .saturating_add(if has_features { FEATURES_HEIGHT } else { 0 });
+    main_height.saturating_sub(fixed_height)
+}
+
+pub(crate) fn available_read_rows(
+    terminal_rows: u16,
+    has_reference: bool,
+    has_features: bool,
+) -> usize {
+    let [_, main, _] = browser_layout(Rect::new(0, 0, 0, terminal_rows));
+    read_area_height(main.height, has_reference, has_features) as usize
+}
+
 /// Return the genomic position under a terminal click in the main browser canvas.
 pub(crate) fn genomic_position_at(app: &App, column: u16, row: u16) -> Option<u64> {
     let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
@@ -223,13 +249,19 @@ fn format_region_display(app: &App) -> String {
 fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     let transform = genomic_transform(app, area);
 
-    let ruler_h = 2u16;
-    let reference_h: u16 = if app.reference.is_some() { 1 } else { 0 };
-    let features_h: u16 = if app.gff.is_some() { 4 } else { 0 };
-    let coverage_h = 3u16.min(area.height / 5);
-    let reads_h = area
-        .height
-        .saturating_sub(ruler_h + reference_h + features_h + coverage_h);
+    let ruler_h = RULER_HEIGHT;
+    let reference_h = if app.reference.is_some() {
+        REFERENCE_HEIGHT
+    } else {
+        0
+    };
+    let features_h = if app.gff.is_some() {
+        FEATURES_HEIGHT
+    } else {
+        0
+    };
+    let coverage_h = coverage_height(area.height);
+    let reads_h = read_area_height(area.height, app.reference.is_some(), app.gff.is_some());
 
     let mut constraints = vec![Constraint::Length(ruler_h)];
     if reference_h > 0 {
@@ -1086,7 +1118,7 @@ mod tests {
         app.toggle_phasing();
 
         let layout = app.cache.phase_layout.as_ref().expect("phased layout");
-        assert_eq!(layout.hp1_rows.len(), 1);
+        assert_eq!(layout.hp1_rows.len(), 3);
         assert_eq!(layout.hp2_rows.len(), 1);
         assert_eq!(
             layout.unphased_rows.as_ref().map_or(0, |rows| rows.len()),
@@ -1107,7 +1139,7 @@ mod tests {
             .collect::<Vec<_>>();
         let hp1 = lines
             .iter()
-            .position(|line| line.contains("HP1  2 reads  PS:50 +1"))
+            .position(|line| line.contains("HP1  4 reads  PS:50 +1"))
             .expect("HP1 header");
         let hp2 = lines
             .iter()
@@ -1118,7 +1150,7 @@ mod tests {
             .position(|line| line.contains("Unphased  2 reads"))
             .expect("unphased header");
 
-        assert_eq!(hp2, hp1 + 2);
+        assert_eq!(hp2, hp1 + 4);
         assert_eq!(unphased, hp2 + 2);
         assert!(lines[hp1].contains("PS:100"));
     }
@@ -1173,6 +1205,12 @@ mod tests {
         assert_eq!(top, Rect::new(0, 0, 80, 1));
         assert_eq!(main, Rect::new(0, 1, 80, 22));
         assert_eq!(bottom, Rect::new(0, 23, 80, 1));
+    }
+
+    #[test]
+    fn available_read_rows_matches_the_drawn_optional_tracks() {
+        assert_eq!(available_read_rows(20, true, true), 8);
+        assert_eq!(available_read_rows(20, false, false), 13);
     }
 
     #[test]

@@ -326,10 +326,11 @@ impl App {
     /// Re-layout pileup and coverage from the already-loaded reads (no disk IO).
     pub fn relayout(&mut self) {
         let visible = self.current_region();
-        let reference_rows = usize::from(self.reference.is_some());
-        let max_rows = self
-            .terminal_rows
-            .saturating_sub(12 + reference_rows as u16) as usize;
+        let max_rows = crate::ui::available_read_rows(
+            self.terminal_rows,
+            self.reference.is_some(),
+            self.gff.is_some(),
+        );
         let cols = self.view_cols();
         self.cache
             .layout_pileup(&visible, max_rows.max(1), self.min_mapq, self.show_phasing);
@@ -448,10 +449,11 @@ impl App {
             e
         })?;
 
-        let reference_rows = usize::from(self.reference.is_some());
-        let max_pileup_rows = self
-            .terminal_rows
-            .saturating_sub(12 + reference_rows as u16) as usize;
+        let max_pileup_rows = crate::ui::available_read_rows(
+            self.terminal_rows,
+            self.reference.is_some(),
+            self.gff.is_some(),
+        );
         let view_cols = self.view_cols();
 
         self.cache.reads = reads;
