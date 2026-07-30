@@ -13,7 +13,6 @@ use super::{InsertionGap, ViewTransform};
 
 /// Show individual bases when the view is this many bp per column or narrower.
 const BASE_RENDER_THRESHOLD: f64 = 5.0;
-const INSERTION_EXPAND_THRESHOLD: f64 = 1.0;
 
 #[derive(Debug, Clone, Copy)]
 struct InsertionEvent {
@@ -148,7 +147,7 @@ pub fn selected_insertion_gap(
     rows: &[PileupRow],
     transform: &ViewTransform,
 ) -> Option<InsertionGap> {
-    if transform.bp_per_col() > INSERTION_EXPAND_THRESHOLD {
+    if transform.bp_per_col() > BASE_RENDER_THRESHOLD {
         return None;
     }
 
@@ -163,7 +162,7 @@ pub fn visible_insertion_gaps(
     rows: &[PileupRow],
     transform: &ViewTransform,
 ) -> Vec<InsertionGap> {
-    if transform.bp_per_col() > INSERTION_EXPAND_THRESHOLD {
+    if transform.bp_per_col() > BASE_RENDER_THRESHOLD {
         return Vec::new();
     }
 
@@ -1155,6 +1154,37 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn insertions_expand_at_every_base_visible_zoom_level() {
+        let read = RenderRead {
+            name: "read-with-ins".to_string(),
+            start: 10,
+            end: 15,
+            strand: Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(2), CigarOp::Match(3)],
+            sequence: b"ACGGTAC".to_vec(),
+            methylation: Vec::new(),
+            phase: ReadPhase::default(),
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        };
+        let reads = vec![read];
+        let rows = vec![vec![0]];
+        let base_visible = ViewTransform::new(10, 35, 5);
+        let too_wide = ViewTransform::new(10, 36, 5);
+
+        assert_eq!(base_visible.bp_per_col(), BASE_RENDER_THRESHOLD);
+        assert_eq!(
+            visible_insertion_gaps(&reads, &rows, &base_visible).len(),
+            1
+        );
+        assert!(selected_insertion_gap(&reads, &rows, &base_visible).is_some());
+        assert!(visible_insertion_gaps(&reads, &rows, &too_wide).is_empty());
+        assert!(selected_insertion_gap(&reads, &rows, &too_wide).is_none());
     }
 
     #[test]

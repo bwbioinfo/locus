@@ -143,7 +143,7 @@ CIGAR operations:
 - `~` — skip / intron (N)
 - `S` — soft clip
 
-In the demo screenshot, the selected `read_ins_meth` insertion is expanded as `[[GGGG]]`, while the `read_del` deletion is visible as `--`.
+In the demo screenshot, the selected `read_ins_meth` insertion is expanded as `[[GGGG]]`, while the `read_del` deletion is visible as `--`. Manual expansion is available at every zoom level that renders individual bases.
 
 Methylation display:
 - Press `m` to show or hide modified-base calls parsed from SAM/BAM `MM` tags.
