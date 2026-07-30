@@ -403,15 +403,7 @@ impl App {
             }
         };
 
-        let region = {
-            let gff = self.gff.as_ref().unwrap();
-            let feat = &gff.features[idx];
-            // Add 10 % padding each side
-            let pad = (feat.end - feat.start) / 10 + 1;
-            let padded_start = feat.start.saturating_sub(pad);
-            let padded_end = feat.end + pad;
-            Region::new(feat.seqname.clone(), padded_start, padded_end)
-        };
+        let region = self.gff.as_ref().unwrap().features[idx].padded_region();
 
         self.jump_to_region(&region).map_err(|e| {
             self.status_msg = Some(format!("{e}"));

@@ -9,7 +9,7 @@ pub struct Args {
     /// BAM file to open (must have .bai index)
     pub bam: Option<String>,
 
-    /// Jump to region on startup, e.g. chr1:100000-101000
+    /// Jump to a region or, with --gff, a feature name on startup (e.g. RB1)
     #[arg(long, short)]
     pub region: Option<String>,
 

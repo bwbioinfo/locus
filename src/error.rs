@@ -12,6 +12,9 @@ pub enum LocusError {
     #[error("Unknown contig: {0}")]
     UnknownContig(String),
 
+    #[error("Unknown feature: {0}")]
+    UnknownFeature(String),
+
     #[error("Malformed region string: {0}")]
     MalformedRegion(String),
 
