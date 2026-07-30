@@ -11,6 +11,8 @@ pub struct ViewTransform {
     pub region_end: u64,
     pub cols: u16,
     pub insertion_gap: Option<InsertionGap>,
+    pub selection_bracket: Option<u64>,
+    insertion_bracket_count: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,10 +29,6 @@ impl InsertionGap {
     pub fn anchor_ref_pos(self) -> u64 {
         self.ref_pos.saturating_sub(1)
     }
-
-    pub fn visual_len(self) -> u64 {
-        self.len.saturating_add(2)
-    }
 }
 
 impl ViewTransform {
@@ -40,11 +38,25 @@ impl ViewTransform {
             region_end: end,
             cols,
             insertion_gap: None,
+            selection_bracket: None,
+            insertion_bracket_count: 1,
         }
     }
 
     pub fn with_insertion_gap(mut self, insertion_gap: Option<InsertionGap>) -> Self {
         self.insertion_gap = insertion_gap;
+        self
+    }
+
+    /// Reserve bracket columns around a selected reference base.
+    pub fn with_selection_bracket(mut self, selection_bracket: Option<u64>) -> Self {
+        self.selection_bracket = selection_bracket;
+        self
+    }
+
+    /// Use an outer bracket pair for a selected expanded insertion.
+    pub fn with_double_insertion_brackets(mut self, double_bracketed: bool) -> Self {
+        self.insertion_bracket_count = if double_bracketed { 2 } else { 1 };
         self
     }
 
@@ -60,7 +72,7 @@ impl ViewTransform {
     #[allow(dead_code)]
     pub fn bp_to_col(&self, pos: u64) -> Option<u16> {
         let col = self.base_col_for_ref(pos)?;
-        Some(self.apply_insertion_gap(pos, col))
+        Some(self.apply_visual_offsets(pos, col))
     }
 
     /// Convert a terminal column to its 0-based genomic position.
@@ -71,22 +83,35 @@ impl ViewTransform {
             return None;
         }
 
-        let base_col = match self.insertion_gap {
-            Some(gap) if (self.region_start..self.region_end).contains(&gap.ref_pos) => {
-                let gap_start = self.base_col_for_ref(gap.ref_pos)?;
-                let gap_len = gap.visual_len() as u16;
-                let gap_end = gap_start.saturating_add(gap_len);
-                if (gap_start..gap_end).contains(&col) {
-                    return Some(gap.anchor_ref_pos());
-                }
-                if col >= gap_end {
-                    col.saturating_sub(gap_len)
-                } else {
-                    col
-                }
+        let mut base_col = col;
+        if let Some(gap) = self
+            .insertion_gap
+            .filter(|gap| (self.region_start..self.region_end).contains(&gap.ref_pos))
+        {
+            let gap_start = self.insertion_start_col(gap)?;
+            let gap_len = self.insertion_visual_len(gap) as u16;
+            let gap_end = gap_start.saturating_add(gap_len);
+            if (gap_start..gap_end).contains(&col) {
+                return Some(gap.anchor_ref_pos());
             }
-            _ => col,
-        };
+            if col >= gap_end {
+                base_col = col.saturating_sub(gap_len);
+            }
+        }
+
+        if let Some(selection_bracket) = self.selection_bracket {
+            let selected_col = self.selection_col_before_insertion(selection_bracket)?;
+            let left_col = selected_col.saturating_sub(1);
+            let right_col = selected_col.saturating_add(1);
+            if base_col == left_col || base_col == right_col {
+                return Some(selection_bracket);
+            }
+            if base_col > selected_col {
+                base_col = base_col.saturating_sub(2);
+            } else if base_col == selected_col {
+                base_col = base_col.saturating_sub(1);
+            }
+        }
 
         let span = self.region_end - self.region_start;
         let offset = (u64::from(base_col) * span).div_ceil(u64::from(self.cols));
@@ -105,7 +130,7 @@ impl ViewTransform {
             self.cols
         } else {
             let col = ((start - self.region_start) as f64 / span * self.cols as f64) as u16;
-            self.apply_insertion_gap(start, col)
+            self.apply_visual_offsets(start, col)
         };
         let col_end = if end >= self.region_end {
             self.cols
@@ -113,7 +138,7 @@ impl ViewTransform {
             0u16
         } else {
             let col = ((end - self.region_start) as f64 / span * self.cols as f64) as u16;
-            self.apply_insertion_gap(end, col)
+            self.apply_visual_offsets(end, col)
         };
         (
             col_start,
@@ -128,7 +153,7 @@ impl ViewTransform {
         }
         let left_border_col = self.insertion_border_cols(insertion_ref_pos)?.0;
         let col = left_border_col
-            .saturating_add(1)
+            .saturating_add(self.insertion_bracket_count())
             .saturating_add(insertion_offset as u16);
         (col < self.cols).then_some(col)
     }
@@ -138,9 +163,25 @@ impl ViewTransform {
         if gap.ref_pos != insertion_ref_pos {
             return None;
         }
-        let base_col = self.base_col_for_ref(insertion_ref_pos)?;
-        let right_col = base_col.saturating_add(gap.len as u16).saturating_add(1);
+        let base_col = self.insertion_start_col(gap)?;
+        let right_col = base_col
+            .saturating_add(gap.len as u16)
+            .saturating_add(self.insertion_bracket_count().saturating_mul(2))
+            .saturating_sub(1);
         (right_col < self.cols).then_some((base_col, right_col))
+    }
+
+    /// Terminal columns containing the fluorescent brackets around a selected base.
+    pub fn selection_bracket_cols(&self) -> Option<(u16, u16)> {
+        let selection_bracket = self.selection_bracket?;
+        let selected_col = self.bp_to_col(selection_bracket)?;
+        let left_col = selected_col.checked_sub(1)?;
+        let right_col = selected_col.checked_add(1)?;
+        (right_col < self.cols).then_some((left_col, right_col))
+    }
+
+    pub fn insertion_bracket_count(&self) -> u16 {
+        u16::from(self.insertion_bracket_count)
     }
 
     fn base_col_for_ref(&self, pos: u64) -> Option<u16> {
@@ -157,9 +198,36 @@ impl ViewTransform {
 
     fn apply_insertion_gap(&self, pos: u64, col: u16) -> u16 {
         match self.insertion_gap {
-            Some(gap) if pos >= gap.ref_pos => {
-                col.saturating_add(gap.visual_len() as u16).min(self.cols)
-            }
+            Some(gap) if pos >= gap.ref_pos => col
+                .saturating_add(self.insertion_visual_len(gap) as u16)
+                .min(self.cols),
+            _ => col,
+        }
+    }
+
+    fn insertion_visual_len(&self, gap: InsertionGap) -> u64 {
+        gap.len
+            .saturating_add(u64::from(self.insertion_bracket_count).saturating_mul(2))
+    }
+
+    fn insertion_start_col(&self, gap: InsertionGap) -> Option<u16> {
+        let col = self.base_col_for_ref(gap.ref_pos)?;
+        Some(self.apply_selection_bracket(gap.ref_pos, col))
+    }
+
+    fn selection_col_before_insertion(&self, selection_bracket: u64) -> Option<u16> {
+        let col = self.base_col_for_ref(selection_bracket)?;
+        Some(self.apply_selection_bracket(selection_bracket, col))
+    }
+
+    fn apply_visual_offsets(&self, pos: u64, col: u16) -> u16 {
+        self.apply_insertion_gap(pos, self.apply_selection_bracket(pos, col))
+    }
+
+    fn apply_selection_bracket(&self, pos: u64, col: u16) -> u16 {
+        match self.selection_bracket {
+            Some(selection_bracket) if pos > selection_bracket => col.saturating_add(2),
+            Some(selection_bracket) if pos == selection_bracket => col.saturating_add(1),
             _ => col,
         }
     }
@@ -210,6 +278,56 @@ mod tests {
         assert_eq!(t.col_to_bp(13), Some(149));
         assert_eq!(t.col_to_bp(14), Some(150));
         assert_eq!(t.col_to_bp(15), Some(155));
+    }
+
+    #[test]
+    fn selection_brackets_reserve_columns_without_replacing_the_selected_base() {
+        let t = ViewTransform::new(100, 110, 10).with_selection_bracket(Some(104));
+
+        assert_eq!(t.bp_to_col(103), Some(3));
+        assert_eq!(t.bp_to_col(104), Some(5));
+        assert_eq!(t.bp_to_col(105), Some(7));
+        assert_eq!(t.selection_bracket_cols(), Some((4, 6)));
+        assert_eq!(t.col_to_bp(4), Some(104));
+        assert_eq!(t.col_to_bp(5), Some(104));
+        assert_eq!(t.col_to_bp(6), Some(104));
+        assert_eq!(t.col_to_bp(7), Some(105));
+    }
+
+    #[test]
+    fn selected_insertions_reserve_an_outer_bracket_pair() {
+        let t = ViewTransform::new(100, 120, 20)
+            .with_insertion_gap(Some(InsertionGap {
+                ref_pos: 110,
+                len: 2,
+            }))
+            .with_double_insertion_brackets(true);
+
+        assert_eq!(t.insertion_border_cols(110), Some((10, 15)));
+        assert_eq!(t.insertion_col(110, 0), Some(12));
+        assert_eq!(t.insertion_col(110, 1), Some(13));
+        assert_eq!(t.col_to_bp(10), Some(109));
+        assert_eq!(t.col_to_bp(15), Some(109));
+        assert_eq!(t.bp_to_col(110), Some(16));
+    }
+
+    #[test]
+    fn selection_brackets_and_insertion_gaps_keep_regular_columns_clickable() {
+        let t = ViewTransform::new(100, 120, 20)
+            .with_insertion_gap(Some(InsertionGap {
+                ref_pos: 110,
+                len: 1,
+            }))
+            .with_selection_bracket(Some(105));
+
+        assert_eq!(t.bp_to_col(105), Some(6));
+        assert_eq!(t.bp_to_col(106), Some(8));
+        assert_eq!(t.bp_to_col(110), Some(15));
+        assert_eq!(t.col_to_bp(5), Some(105));
+        assert_eq!(t.col_to_bp(7), Some(105));
+        assert_eq!(t.col_to_bp(8), Some(106));
+        assert_eq!(t.col_to_bp(12), Some(109));
+        assert_eq!(t.col_to_bp(15), Some(110));
     }
 
     #[test]

@@ -120,6 +120,7 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         format_region_display(app),
     );
     let insertion_mode = insertion_mode_label(app.expand_insertions);
+    let selection_bracket_mode = selection_bracket_mode_label(app.show_selection_brackets);
     let methylation_mode = methylation_mode_label(app.show_methylation);
     let phasing_mode = phasing_mode_label(app.show_phasing);
     let theme_mode = theme_mode_label(app.theme);
@@ -134,12 +135,13 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
             format!(" SELECTED {position}  {tally} ")
         });
     let metrics = format!(
-        " {}  reads:{}  {}  scale:{:.1} bp/col  {}  {}  {} ",
+        " {}  reads:{}  {}  scale:{:.1} bp/col  {}  {}  {}  {} ",
         mapq_filter,
         read_count,
         phasing_mode,
         bp_per_col,
         insertion_mode,
+        selection_bracket_mode,
         methylation_mode,
         theme_mode
     );
@@ -201,6 +203,10 @@ fn insertion_mode_label(expanded: bool) -> &'static str {
     } else {
         "ins:collapsed"
     }
+}
+
+fn selection_bracket_mode_label(shown: bool) -> &'static str {
+    if shown { "sel:brackets" } else { "sel:plain" }
 }
 
 fn methylation_mode_label(shown: bool) -> &'static str {
@@ -411,7 +417,21 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
 fn genomic_transform(app: &App, area: Rect) -> ViewTransform {
     let base_transform =
         ViewTransform::new(app.view_start, app.view_end, area.width.saturating_sub(2));
-    base_transform.with_insertion_gap(app.selected_insertion_gap(&base_transform))
+    let insertion_gap = app.selected_insertion_gap(&base_transform);
+    let show_selection_brackets = app.show_selection_brackets && base_transform.bp_per_col() <= 1.0;
+    let selected_insertion = show_selection_brackets
+        && app.selected_ref_pos.is_some_and(|selected_ref_pos| {
+            insertion_gap.is_some_and(|gap| gap.anchor_ref_pos() == selected_ref_pos)
+        });
+    let selection_bracket = if show_selection_brackets && !selected_insertion {
+        app.selected_ref_pos
+    } else {
+        None
+    };
+    base_transform
+        .with_insertion_gap(insertion_gap)
+        .with_selection_bracket(selection_bracket)
+        .with_double_insertion_brackets(selected_insertion)
 }
 
 fn draw_standard_pileup(frame: &mut Frame, app: &App, transform: ViewTransform, area: Rect) {
@@ -714,6 +734,7 @@ fn render_reads_track(
         SelectedPositionOverlay {
             selected_ref_pos: app.selected_ref_pos,
             transform,
+            theme: app.theme,
         },
         area,
     );
@@ -762,9 +783,9 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
     let keys = match app.mode {
         Mode::Normal => {
             if app.gff.is_some() {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  b:brackets  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
             } else {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  +/-:zoom  i:insertions  b:brackets  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
             }
         }
         Mode::GoTo => " Enter:confirm  Esc:cancel",
@@ -952,6 +973,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         Line::from("  ↑ / + / =  Zoom in"),
         Line::from("  ↓ / -      Zoom out"),
         Line::from("  Left click Select genomic position and highlight read bases"),
+        Line::from("  b          Toggle fluorescent selection brackets"),
         Line::from("  i          Toggle expanded insertion sequence"),
         Line::from("  m          Toggle read methylation"),
         Line::from("  p          Toggle separated HP1 / HP2 read tracks"),
@@ -1278,6 +1300,12 @@ mod tests {
     }
 
     #[test]
+    fn selection_bracket_mode_label_reflects_toggle_state() {
+        assert_eq!(selection_bracket_mode_label(true), "sel:brackets");
+        assert_eq!(selection_bracket_mode_label(false), "sel:plain");
+    }
+
+    #[test]
     fn theme_mode_label_reflects_theme_state() {
         assert_eq!(theme_mode_label(crate::theme::Theme::Dark), "theme:dark");
         assert_eq!(theme_mode_label(crate::theme::Theme::Light), "theme:light");
@@ -1363,5 +1391,34 @@ mod tests {
             genomic_position_at(&app, main.x + right_border, main.y),
             Some(anchor)
         );
+    }
+
+    #[test]
+    fn selected_expanded_insertions_use_double_brackets_when_enabled() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 110;
+        app.terminal_rows = 20;
+        app.jump_to_region(&Region::new("chrDemo", 44, 115))
+            .expect("set demo region");
+        app.refresh().expect("load demo reads");
+        app.expand_insertions = true;
+        app.cycle_insertion_expansion(true);
+        let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let base_transform =
+            ViewTransform::new(app.view_start, app.view_end, main.width.saturating_sub(2));
+        let gap = app
+            .selected_insertion_gap(&base_transform)
+            .expect("visible insertion gap");
+
+        app.select_reference_position(gap.anchor_ref_pos());
+        let selected_transform = genomic_transform(&app, main);
+        assert_eq!(selected_transform.insertion_bracket_count(), 2);
+        assert_eq!(selected_transform.selection_bracket, None);
+
+        app.toggle_selection_brackets();
+        let unbracketed_transform = genomic_transform(&app, main);
+        assert_eq!(unbracketed_transform.insertion_bracket_count(), 1);
     }
 }

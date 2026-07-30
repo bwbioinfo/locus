@@ -40,6 +40,7 @@ pub struct ReadsTrack<'a> {
 pub struct SelectedPositionOverlay {
     pub selected_ref_pos: Option<u64>,
     pub transform: ViewTransform,
+    pub theme: Theme,
 }
 
 impl Widget for SelectedPositionOverlay {
@@ -55,17 +56,42 @@ impl Widget for SelectedPositionOverlay {
             return;
         }
 
+        let bracket_cols = self.transform.selection_bracket_cols();
         for y in area.y..area.y.saturating_add(area.height) {
-            let Some(cell) = buf.cell_mut((x, y)) else {
-                continue;
+            let occupied = if let Some(cell) = buf.cell_mut((x, y)) {
+                if cell.symbol().trim().is_empty() {
+                    false
+                } else {
+                    let style = cell
+                        .style()
+                        .add_modifier(Modifier::REVERSED | Modifier::UNDERLINED);
+                    cell.set_style(style);
+                    true
+                }
+            } else {
+                false
             };
-            if cell.symbol().trim().is_empty() {
+            if !occupied {
                 continue;
             }
-            let style = cell
-                .style()
-                .add_modifier(Modifier::REVERSED | Modifier::UNDERLINED);
-            cell.set_style(style);
+            if let Some((left_col, right_col)) = bracket_cols {
+                draw_bracket(
+                    left_col,
+                    y,
+                    '[',
+                    selection_bracket_style(self.theme),
+                    area,
+                    buf,
+                );
+                draw_bracket(
+                    right_col,
+                    y,
+                    ']',
+                    selection_bracket_style(self.theme),
+                    area,
+                    buf,
+                );
+            }
         }
     }
 }
@@ -385,19 +411,37 @@ fn draw_insertion_box(insertion_ref_pos: u64, context: BaseRenderContext<'_>, bu
     else {
         return;
     };
-    let style = insertion_box_style(context.theme);
-    let left_x = context.area.x + left_col;
-    let right_x = context.area.x + right_col;
-
-    if left_x < context.area.x + context.area.width
-        && let Some(cell) = buf.cell_mut((left_x, context.y))
-    {
-        cell.set_char('[').set_style(style);
+    for offset in 0..context.transform.insertion_bracket_count() {
+        let style = if context.transform.insertion_bracket_count() > 1 && offset == 0 {
+            selection_bracket_style(context.theme)
+        } else {
+            insertion_box_style(context.theme)
+        };
+        draw_bracket(
+            left_col.saturating_add(offset),
+            context.y,
+            '[',
+            style,
+            context.area,
+            buf,
+        );
+        draw_bracket(
+            right_col.saturating_sub(offset),
+            context.y,
+            ']',
+            style,
+            context.area,
+            buf,
+        );
     }
-    if right_x < context.area.x + context.area.width
-        && let Some(cell) = buf.cell_mut((right_x, context.y))
+}
+
+fn draw_bracket(col: u16, y: u16, bracket: char, style: Style, area: Rect, buf: &mut Buffer) {
+    let x = area.x.saturating_add(col);
+    if x < area.x.saturating_add(area.width)
+        && let Some(cell) = buf.cell_mut((x, y))
     {
-        cell.set_char(']').set_style(style);
+        cell.set_char(bracket).set_style(style);
     }
 }
 
@@ -586,6 +630,12 @@ fn insertion_box_style(theme: Theme) -> Style {
     Style::default()
         .fg(theme.insertion_marker_bg())
         .add_modifier(Modifier::BOLD)
+}
+
+fn selection_bracket_style(theme: Theme) -> Style {
+    Style::default()
+        .fg(theme.selection_bracket_fg())
+        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
 }
 
 fn insertion_boundary_style(style: Style) -> Style {
@@ -794,29 +844,36 @@ mod tests {
     }
 
     #[test]
-    fn selected_position_overlay_marks_only_occupied_read_cells() {
-        let area = Rect::new(0, 0, 4, 2);
-        let transform = ViewTransform::new(100, 104, 4);
+    fn selected_position_overlay_marks_occupied_read_cells_with_brackets() {
+        let area = Rect::new(0, 0, 6, 2);
+        let transform = ViewTransform::new(100, 104, 6).with_selection_bracket(Some(102));
         let mut buf = Buffer::empty(area);
-        buf[(2, 0)]
+        buf[(4, 0)]
             .set_char('A')
             .set_style(Style::default().fg(Color::Green));
 
         SelectedPositionOverlay {
             selected_ref_pos: Some(102),
             transform,
+            theme: Theme::Dark,
         }
         .render(area, &mut buf);
 
         assert!(
-            buf[(2, 0)]
+            buf[(4, 0)]
                 .style()
                 .add_modifier
                 .contains(Modifier::REVERSED | Modifier::UNDERLINED)
         );
-        assert_eq!(buf[(2, 0)].style().fg, Some(Color::Green));
-        assert!(buf[(2, 1)].symbol().trim().is_empty());
-        assert!(buf[(2, 1)].style().add_modifier.is_empty());
+        assert_eq!(buf[(4, 0)].style().fg, Some(Color::Green));
+        assert_eq!(buf[(3, 0)].symbol(), "[");
+        assert_eq!(buf[(5, 0)].symbol(), "]");
+        assert_eq!(
+            buf[(3, 0)].style().fg,
+            Some(Theme::Dark.selection_bracket_fg())
+        );
+        assert!(buf[(3, 1)].symbol().trim().is_empty());
+        assert!(buf[(5, 1)].style().add_modifier.is_empty());
     }
 
     #[test]
@@ -968,11 +1025,13 @@ mod tests {
             is_supplementary: false,
             is_duplicate: false,
         };
-        let area = Rect::new(0, 0, 8, 1);
-        let transform = ViewTransform::new(10, 18, 8).with_insertion_gap(Some(InsertionGap {
-            ref_pos: 12,
-            len: 2,
-        }));
+        let area = Rect::new(0, 0, 10, 1);
+        let transform = ViewTransform::new(10, 20, 10)
+            .with_insertion_gap(Some(InsertionGap {
+                ref_pos: 12,
+                len: 2,
+            }))
+            .with_double_insertion_brackets(true);
         let mut buf = Buffer::empty(area);
 
         render_bases(
@@ -993,10 +1052,11 @@ mod tests {
         SelectedPositionOverlay {
             selected_ref_pos: Some(11),
             transform,
+            theme: Theme::Dark,
         }
         .render(area, &mut buf);
 
-        for x in [1, 3, 4] {
+        for x in [1, 4, 5] {
             assert!(
                 buf[(x, 0)]
                     .style()
@@ -1004,6 +1064,14 @@ mod tests {
                     .contains(Modifier::REVERSED | Modifier::UNDERLINED)
             );
         }
+        assert_eq!(buf[(2, 0)].symbol(), "[");
+        assert_eq!(buf[(3, 0)].symbol(), "[");
+        assert_eq!(buf[(6, 0)].symbol(), "]");
+        assert_eq!(buf[(7, 0)].symbol(), "]");
+        assert_eq!(
+            buf[(2, 0)].style().fg,
+            Some(Theme::Dark.selection_bracket_fg())
+        );
     }
 
     #[test]

@@ -67,6 +67,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Up => app.zoom_in(),
         KeyCode::Char('-') | KeyCode::Down => app.zoom_out(),
         KeyCode::Char('i') => app.toggle_insertions(),
+        KeyCode::Char('b') => app.toggle_selection_brackets(),
         KeyCode::Char('m') => app.toggle_methylation(),
         KeyCode::Char('p') => app.toggle_phasing(),
         KeyCode::Char('t') => app.toggle_theme(),
@@ -232,6 +233,23 @@ mod tests {
         .expect("handle phase toggle");
 
         assert!(app.show_phasing);
+        assert!(!app.needs_fetch);
+    }
+
+    #[test]
+    fn b_key_toggles_selection_brackets_without_fetching() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.needs_fetch = false;
+
+        handle_normal(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+        )
+        .expect("handle selection-bracket toggle");
+
+        assert!(!app.show_selection_brackets);
         assert!(!app.needs_fetch);
     }
 

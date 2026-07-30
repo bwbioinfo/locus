@@ -63,6 +63,7 @@ pub struct App {
     pub selected_ref_pos: Option<u64>,
     /// Alleles observed at the selected reference position under the active MAPQ filter.
     pub selected_allele_tally: Option<PositionAlleleTally>,
+    pub show_selection_brackets: bool,
     pub show_methylation: bool,
     pub show_phasing: bool,
     pub theme: Theme,
@@ -130,6 +131,7 @@ impl App {
             selected_insertion_ref_pos: None,
             selected_ref_pos: None,
             selected_allele_tally: None,
+            show_selection_brackets: true,
             show_methylation: false,
             show_phasing: false,
             theme,
@@ -208,6 +210,15 @@ impl App {
     pub fn toggle_theme(&mut self) {
         self.theme = self.theme.toggle();
         self.status_msg = Some(format!("{} theme", self.theme.name()));
+    }
+
+    pub fn toggle_selection_brackets(&mut self) {
+        self.show_selection_brackets = !self.show_selection_brackets;
+        self.status_msg = Some(if self.show_selection_brackets {
+            "selection brackets shown".to_string()
+        } else {
+            "selection brackets hidden".to_string()
+        });
     }
 
     pub fn cycle_insertion_expansion(&mut self, forward: bool) {
@@ -639,6 +650,19 @@ mod tests {
         assert!(app.cache.phase_layout.is_none());
         assert_eq!(app.cache.pileup_rows, combined_rows);
         assert_eq!(app.status_msg.as_deref(), Some("phasing hidden"));
+    }
+
+    #[test]
+    fn selection_brackets_are_enabled_by_default_and_toggle_without_refetching() {
+        let mut app = demo_app(0);
+        app.needs_fetch = false;
+
+        assert!(app.show_selection_brackets);
+        app.toggle_selection_brackets();
+
+        assert!(!app.show_selection_brackets);
+        assert!(!app.needs_fetch);
+        assert_eq!(app.status_msg.as_deref(), Some("selection brackets hidden"));
     }
 
     #[test]

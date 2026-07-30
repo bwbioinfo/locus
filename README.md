@@ -97,6 +97,7 @@ To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capt
 | `+` / `=` | Zoom in |
 | `-` | Zoom out |
 | Left click | Select a genomic position and highlight occupied read cells |
+| `b` | Toggle fluorescent brackets around selected read bases |
 | `i` | Toggle expanded insertion sequence |
 | `m` | Toggle read methylation display |
 | `p` | Toggle separate HP1/HP2 read tracks |
@@ -142,7 +143,7 @@ CIGAR operations:
 - `~` — skip / intron (N)
 - `S` — soft clip
 
-In the demo screenshot, the `read_ins_meth` insertion is expanded as `[GGGG]`, while the `read_del` deletion is visible as `--`.
+In the demo screenshot, the selected `read_ins_meth` insertion is expanded as `[[GGGG]]`, while the `read_del` deletion is visible as `--`.
 
 Methylation display:
 - Press `m` to show or hide modified-base calls parsed from SAM/BAM `MM` tags.
@@ -153,8 +154,8 @@ The demo BAM includes forward and reverse-strand MM/ML calls so the `m` toggle v
 
 Position selection:
 - Left-click anywhere in the genomic canvas to select its reference coordinate. The top bar shows `pos:contig:position` using a 1-based position and its MAPQ-filtered allele tally (`A`, `C`, `G`, `T`, `N`, deleted reference alleles such as `-ACT` when a FASTA is loaded, and inserted sequences such as `+GGGG`). Substitutions are included in their observed base count.
-- Occupied read cells at that coordinate are reversed and underlined across all visible read tracks without replacing their base, indel, methylation, phase, or MAPQ styles.
-- When an insertion is expanded, clicking any gap cell selects the preceding reference base, highlights that base and the inserted sequence, and reports the insertion tally there. Selections clear when navigating to a different view or contig.
+- Occupied read cells at that coordinate are reversed and underlined across all visible read tracks. When individual bases are visible, fluorescent-green brackets around occupied selected bases are enabled by default and can be toggled with `b`.
+- When an insertion is expanded, clicking any gap cell selects the preceding reference base, highlights that base and the inserted sequence, reports the insertion tally there, and displays the selected insertion with a fluorescent outer bracket pair (`[[sequence]]`). Selections clear when navigating to a different view or contig.
 
 Phased-read display:
 - Press `p` to switch between the combined pileup and separate haplotype tracks parsed from integer `HP` and `PS` BAM tags. The separated display is off by default.

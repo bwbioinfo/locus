@@ -80,6 +80,14 @@ impl Theme {
         }
     }
 
+    /// High-visibility bracket color for selected bases and expanded insertions.
+    pub fn selection_bracket_fg(self) -> Color {
+        match self {
+            Self::Dark => Color::Rgb(57, 255, 20),
+            Self::Light => Color::Rgb(0, 150, 58),
+        }
+    }
+
     pub fn brand_fg(self) -> Color {
         match self {
             Self::Dark => Color::Cyan,
