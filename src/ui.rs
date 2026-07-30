@@ -19,7 +19,7 @@ use crate::render::{
 };
 use crate::{
     app::{App, Mode},
-    cache::{PhasePileupLayout, PileupRow, RenderRead},
+    cache::{PhasePileupLayout, PileupRow, PositionAlleleTally, RenderRead},
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -125,7 +125,14 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     let theme_mode = theme_mode_label(app.theme);
     let mapq_filter = mapq_filter_label(app.min_mapq);
     let selected_position = selected_position_label(app.current_contig(), app.selected_ref_pos)
-        .map(|position| format!(" pos:{position}"))
+        .map(|position| {
+            let tally = app
+                .selected_allele_tally
+                .as_ref()
+                .map(selected_allele_tally_label)
+                .unwrap_or_else(|| "alleles:none".to_string());
+            format!(" pos:{position} {tally}")
+        })
         .unwrap_or_default();
     let metrics = format!(
         "{selected_position}  reads:{}  {}  {}  scale:{:.1} bp/col  {}  {}  {} ",
@@ -200,6 +207,32 @@ fn mapq_filter_label(min_mapq: u8) -> String {
 
 fn selected_position_label(contig: &str, selected_ref_pos: Option<u64>) -> Option<String> {
     selected_ref_pos.map(|position| format!("{contig}:{}", position + 1))
+}
+
+fn selected_allele_tally_label(tally: &PositionAlleleTally) -> String {
+    let mut alleles = Vec::new();
+    for base in *b"ACGTN" {
+        if let Some(count) = tally.base_counts.get(&base) {
+            alleles.push(format!("{}:{count}", base as char));
+        }
+    }
+    for (&base, &count) in &tally.base_counts {
+        if !matches!(base, b'A' | b'C' | b'G' | b'T' | b'N') {
+            alleles.push(format!("{}:{count}", base as char));
+        }
+    }
+    if tally.deletion_count > 0 {
+        alleles.push(format!("DEL:{}", tally.deletion_count));
+    }
+    for (sequence, count) in &tally.insertion_counts {
+        alleles.push(format!("+{}:{count}", String::from_utf8_lossy(sequence)));
+    }
+
+    if alleles.is_empty() {
+        "alleles:none".to_string()
+    } else {
+        format!("alleles:{}", alleles.join(" "))
+    }
 }
 
 fn truncate_to_width(text: &str, width: usize) -> String {
@@ -1196,6 +1229,24 @@ mod tests {
             Some("chrDemo:65".to_string())
         );
         assert_eq!(selected_position_label("chrDemo", None), None);
+    }
+
+    #[test]
+    fn selected_allele_tally_label_lists_bases_and_indels() {
+        let tally = PositionAlleleTally {
+            base_counts: BTreeMap::from([(b'A', 3), (b'C', 1)]),
+            deletion_count: 2,
+            insertion_counts: BTreeMap::from([(b"GG".to_vec(), 1)]),
+        };
+
+        assert_eq!(
+            selected_allele_tally_label(&tally),
+            "alleles:A:3 C:1 DEL:2 +GG:1"
+        );
+        assert_eq!(
+            selected_allele_tally_label(&PositionAlleleTally::default()),
+            "alleles:none"
+        );
     }
 
     #[test]

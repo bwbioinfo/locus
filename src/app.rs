@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::{
     bam::BamSource,
-    cache::RegionCache,
+    cache::{PositionAlleleTally, RegionCache},
     gff::GffStore,
     reference::ReferenceStore,
     region::{Region, parse_region},
@@ -60,6 +60,8 @@ pub struct App {
     pub selected_insertion_ref_pos: Option<u64>,
     /// 0-based genomic position selected with the mouse.
     pub selected_ref_pos: Option<u64>,
+    /// Alleles observed at the selected reference position under the active MAPQ filter.
+    pub selected_allele_tally: Option<PositionAlleleTally>,
     pub show_methylation: bool,
     pub show_phasing: bool,
     pub theme: Theme,
@@ -126,6 +128,7 @@ impl App {
             expand_insertions: false,
             selected_insertion_ref_pos: None,
             selected_ref_pos: None,
+            selected_allele_tally: None,
             show_methylation: false,
             show_phasing: false,
             theme,
@@ -258,6 +261,7 @@ impl App {
     pub fn select_reference_position(&mut self, pos: u64) {
         if (self.view_start..self.view_end).contains(&pos) {
             self.selected_ref_pos = Some(pos);
+            self.refresh_selected_allele_tally();
             self.status_msg = None;
         }
     }
@@ -310,7 +314,7 @@ impl App {
     /// If the new view is within the cached padded region, just re-layout without disk IO.
     /// Only set needs_fetch=true when the view has drifted outside the loaded window.
     fn mark_dirty(&mut self) {
-        self.selected_ref_pos = None;
+        self.clear_selected_reference_position();
         let within_cache = self.cache.loaded_region.as_ref().is_some_and(|loaded| {
             loaded.contig == self.current_contig()
                 && self.view_start >= loaded.start
@@ -336,6 +340,7 @@ impl App {
             .layout_pileup(&visible, max_rows.max(1), self.min_mapq, self.show_phasing);
         self.cache
             .compute_coverage(&visible, cols.max(1), self.min_mapq);
+        self.refresh_selected_allele_tally();
     }
 
     pub fn jump_to_region(&mut self, region: &Region) -> Result<()> {
@@ -347,7 +352,7 @@ impl App {
             .ok_or_else(|| crate::error::LocusError::UnknownContig(region.contig.clone()))?;
 
         self.contig_idx = idx;
-        self.selected_ref_pos = None;
+        self.clear_selected_reference_position();
         let len = self.current_contig_len();
 
         self.view_start = region.start.min(len.saturating_sub(1));
@@ -365,7 +370,7 @@ impl App {
     pub fn select_contig(&mut self, idx: usize) {
         if idx < self.source.contigs.len() {
             self.contig_idx = idx;
-            self.selected_ref_pos = None;
+            self.clear_selected_reference_position();
             let len = self.current_contig_len();
             self.view_start = 0;
             self.view_end = 1_000.min(len);
@@ -471,6 +476,7 @@ impl App {
         );
         self.cache
             .compute_coverage(&visible, view_cols.max(1), self.min_mapq);
+        self.refresh_selected_allele_tally();
 
         self.needs_fetch = false;
         self.status_msg = None;
@@ -556,6 +562,17 @@ impl App {
             self.view_end = self.view_start + 1;
         }
     }
+
+    fn clear_selected_reference_position(&mut self) {
+        self.selected_ref_pos = None;
+        self.selected_allele_tally = None;
+    }
+
+    fn refresh_selected_allele_tally(&mut self) {
+        self.selected_allele_tally = self
+            .selected_ref_pos
+            .map(|position| self.cache.allele_tally_at(position, self.min_mapq));
+    }
 }
 
 #[cfg(test)]
@@ -640,10 +657,56 @@ mod tests {
         app.select_reference_position(selected);
 
         assert_eq!(app.selected_ref_pos, Some(selected));
+        assert_eq!(
+            app.selected_allele_tally,
+            Some(PositionAlleleTally::default())
+        );
         assert!(!app.needs_fetch);
 
         app.pan(1);
 
         assert!(app.selected_ref_pos.is_none());
+        assert!(app.selected_allele_tally.is_none());
+    }
+
+    #[test]
+    fn mapq_filter_refreshes_selected_allele_tally() {
+        let mut app = demo_app(0);
+        app.view_start = 0;
+        app.view_end = 10;
+        let mut low = crate::cache::RenderRead {
+            name: "low".to_string(),
+            start: 0,
+            end: 3,
+            strand: crate::cache::Strand::Forward,
+            mapq: 20,
+            cigar_ops: vec![crate::cache::CigarOp::Match(3)],
+            sequence: b"AAA".to_vec(),
+            methylation: Vec::new(),
+            phase: Default::default(),
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        };
+        low.sequence[1] = b'G';
+        app.cache.reads = vec![low];
+        app.select_reference_position(1);
+        assert_eq!(
+            app.selected_allele_tally
+                .as_ref()
+                .and_then(|tally| tally.base_counts.get(&b'G')),
+            Some(&1)
+        );
+
+        app.begin_mapq_filter();
+        app.command_buffer.push_str("30");
+        app.confirm_mapq_filter();
+
+        assert_eq!(
+            app.selected_allele_tally
+                .as_ref()
+                .map(|tally| &tally.base_counts),
+            Some(&std::collections::BTreeMap::new())
+        );
     }
 }

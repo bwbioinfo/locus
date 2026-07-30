@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{collections::BTreeMap, ops::Range};
 
 use crate::{reference::ReferenceSlice, region::Region};
 
@@ -81,6 +81,31 @@ pub struct RenderRead {
     pub is_duplicate: bool,
 }
 
+/// Alleles observed at one reference position across a set of reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PositionAlleleTally {
+    pub base_counts: BTreeMap<u8, usize>,
+    pub deletion_count: usize,
+    pub insertion_counts: BTreeMap<Vec<u8>, usize>,
+}
+
+impl PositionAlleleTally {
+    fn add_base(&mut self, base: u8) {
+        *self
+            .base_counts
+            .entry(base.to_ascii_uppercase())
+            .or_default() += 1;
+    }
+
+    fn add_insertion(&mut self, sequence: Vec<u8>) {
+        *self.insertion_counts.entry(sequence).or_default() += 1;
+    }
+
+    fn add_deletion(&mut self) {
+        self.deletion_count += 1;
+    }
+}
+
 impl RenderRead {
     #[allow(dead_code)]
     pub fn len_bp(&self) -> u64 {
@@ -126,6 +151,55 @@ impl RenderRead {
         }
 
         aligned
+    }
+
+    fn tally_alleles_at(&self, position: u64, tally: &mut PositionAlleleTally) {
+        let mut read_pos = 0usize;
+        let mut ref_pos = self.start;
+
+        for &op in &self.cigar_ops {
+            match op {
+                CigarOp::SoftClip(n) => read_pos += n as usize,
+                CigarOp::Match(n) | CigarOp::Mismatch(n) => {
+                    let end = ref_pos.saturating_add(n);
+                    if (ref_pos..end).contains(&position) {
+                        let offset = (position - ref_pos) as usize;
+                        let base = self
+                            .sequence
+                            .get(read_pos + offset)
+                            .copied()
+                            .unwrap_or(b'N');
+                        tally.add_base(base);
+                    }
+                    read_pos += n as usize;
+                    ref_pos = end;
+                }
+                CigarOp::Insertion(n) => {
+                    if ref_pos == position {
+                        let sequence = (0..n as usize)
+                            .map(|offset| {
+                                self.sequence
+                                    .get(read_pos + offset)
+                                    .copied()
+                                    .unwrap_or(b'N')
+                                    .to_ascii_uppercase()
+                            })
+                            .collect();
+                        tally.add_insertion(sequence);
+                    }
+                    read_pos += n as usize;
+                }
+                CigarOp::Deletion(n) => {
+                    let end = ref_pos.saturating_add(n);
+                    if (ref_pos..end).contains(&position) {
+                        tally.add_deletion();
+                    }
+                    ref_pos = end;
+                }
+                // A CIGAR skip is an intron or other reference skip, not an indel allele.
+                CigarOp::Skip(n) => ref_pos += n,
+            }
+        }
     }
 }
 
@@ -258,6 +332,18 @@ impl RegionCache {
     /// Compute per-column coverage over `visible` region, binned to `cols` columns.
     pub fn compute_coverage(&mut self, visible: &Region, cols: usize, min_mapq: u8) {
         self.coverage = bin_coverage(&self.reads, visible, cols, min_mapq);
+    }
+
+    /// Count read alleles at `position` across all loaded reads passing `min_mapq`.
+    ///
+    /// This intentionally does not use `pileup_rows`: row capacity is a display concern and
+    /// should not change a position's allele tally.
+    pub fn allele_tally_at(&self, position: u64, min_mapq: u8) -> PositionAlleleTally {
+        let mut tally = PositionAlleleTally::default();
+        for read in self.reads.iter().filter(|read| read.mapq >= min_mapq) {
+            read.tally_alleles_at(position, &mut tally);
+        }
+        tally
     }
 }
 
@@ -469,6 +555,46 @@ mod tests {
         assert_eq!(layout.hp2_rows, 0..1);
         assert_eq!(cache.pileup_rows, vec![vec![1]]);
         assert_eq!(cache.hidden_reads, 0);
+    }
+
+    #[test]
+    fn allele_tally_counts_bases_snvs_and_indels_without_skips() {
+        let mut matched = make_read("matched", 100, 103);
+        matched.sequence = b"AAA".to_vec();
+
+        let mut mismatch = make_read("snv", 100, 103);
+        mismatch.cigar_ops = vec![CigarOp::Mismatch(3)];
+        mismatch.sequence = b"ACA".to_vec();
+
+        let mut inserted = make_read("inserted", 100, 103);
+        inserted.cigar_ops = vec![CigarOp::Match(1), CigarOp::Insertion(2), CigarOp::Match(2)];
+        inserted.sequence = b"AGGTC".to_vec();
+
+        let mut deleted = make_read("deleted", 100, 104);
+        deleted.cigar_ops = vec![CigarOp::Match(1), CigarOp::Deletion(2), CigarOp::Match(1)];
+        deleted.sequence = b"AC".to_vec();
+
+        let mut skipped = make_read("skipped", 100, 104);
+        skipped.cigar_ops = vec![CigarOp::Match(1), CigarOp::Skip(2), CigarOp::Match(1)];
+        skipped.sequence = b"AT".to_vec();
+
+        let mut low_mapq = make_read("low-mapq", 100, 103);
+        low_mapq.mapq = 20;
+        low_mapq.sequence = b"GGG".to_vec();
+
+        let cache = RegionCache {
+            reads: vec![matched, mismatch, inserted, deleted, skipped, low_mapq],
+            ..RegionCache::default()
+        };
+
+        let tally = cache.allele_tally_at(101, 30);
+
+        assert_eq!(tally.base_counts.get(&b'A'), Some(&1));
+        assert_eq!(tally.base_counts.get(&b'C'), Some(&1));
+        assert_eq!(tally.base_counts.get(&b'T'), Some(&1));
+        assert!(!tally.base_counts.contains_key(&b'G'));
+        assert_eq!(tally.deletion_count, 1);
+        assert_eq!(tally.insertion_counts.get(b"GG" as &[u8]), Some(&1));
     }
 
     #[test]

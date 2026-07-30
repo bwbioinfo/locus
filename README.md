@@ -148,7 +148,7 @@ Methylation display:
 The demo BAM includes forward and reverse-strand MM/ML calls so the `m` toggle visibly changes the read pileup.
 
 Position selection:
-- Left-click anywhere in the genomic canvas to select its reference coordinate. The top bar shows `pos:contig:position` using a 1-based position.
+- Left-click anywhere in the genomic canvas to select its reference coordinate. The top bar shows `pos:contig:position` using a 1-based position and its MAPQ-filtered allele tally (`A`, `C`, `G`, `T`, `N`, `DEL`, and inserted sequences such as `+GGGG`). Substitutions are included in their observed base count.
 - Occupied read cells at that coordinate are reversed and underlined across all visible read tracks without replacing their base, indel, methylation, phase, or MAPQ styles.
 - When an insertion is expanded, clicking any gap cell selects the insertion anchor. Selections clear when navigating to a different view or contig.
 
