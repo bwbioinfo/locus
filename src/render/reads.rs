@@ -30,6 +30,7 @@ pub struct ReadsTrack<'a> {
     #[allow(dead_code)]
     pub show_names: bool,
     pub expand_insertions: bool,
+    pub selected_ref_pos: Option<u64>,
     pub show_methylation: bool,
     pub show_phasing: bool,
     pub theme: Theme,
@@ -94,6 +95,7 @@ impl<'a> Widget for ReadsTrack<'a> {
                         area,
                         transform: &self.transform,
                         expand_insertions: self.expand_insertions,
+                        selected_ref_pos: self.selected_ref_pos,
                         show_methylation: self.show_methylation,
                         show_phasing: self.show_phasing,
                         theme: self.theme,
@@ -175,6 +177,7 @@ struct BaseRenderContext<'a> {
     area: Rect,
     transform: &'a ViewTransform,
     expand_insertions: bool,
+    selected_ref_pos: Option<u64>,
     show_methylation: bool,
     show_phasing: bool,
     theme: Theme,
@@ -368,8 +371,11 @@ fn render_inserted_bases(
         if x < context.area.x + context.area.width
             && let Some(cell) = buf.cell_mut((x, context.y))
         {
-            cell.set_char(base as char)
-                .set_style(insertion_base_style(base, context.theme));
+            let mut style = insertion_base_style(base, context.theme);
+            if context.selected_ref_pos == Some(insertion.ref_pos.saturating_sub(1)) {
+                style = style.add_modifier(Modifier::REVERSED | Modifier::UNDERLINED);
+            }
+            cell.set_char(base as char).set_style(style);
         }
     }
 }
@@ -770,6 +776,7 @@ mod tests {
                 area,
                 transform,
                 expand_insertions,
+                selected_ref_pos: None,
                 show_methylation,
                 show_phasing: false,
                 theme,
@@ -943,6 +950,60 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::BOLD | Modifier::UNDERLINED)
         );
+    }
+
+    #[test]
+    fn selected_expanded_insertion_highlights_anchor_and_inserted_bases() {
+        let read = RenderRead {
+            name: "read-with-ins".to_string(),
+            start: 10,
+            end: 13,
+            strand: Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(2), CigarOp::Match(1)],
+            sequence: b"ACGGT".to_vec(),
+            methylation: Vec::new(),
+            phase: ReadPhase::default(),
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        };
+        let area = Rect::new(0, 0, 8, 1);
+        let transform = ViewTransform::new(10, 18, 8).with_insertion_gap(Some(InsertionGap {
+            ref_pos: 12,
+            len: 2,
+        }));
+        let mut buf = Buffer::empty(area);
+
+        render_bases(
+            &read,
+            BaseRenderContext {
+                reference: None,
+                y: 0,
+                area,
+                transform: &transform,
+                expand_insertions: true,
+                selected_ref_pos: Some(11),
+                show_methylation: false,
+                show_phasing: false,
+                theme: Theme::Dark,
+            },
+            &mut buf,
+        );
+        SelectedPositionOverlay {
+            selected_ref_pos: Some(11),
+            transform,
+        }
+        .render(area, &mut buf);
+
+        for x in [1, 3, 4] {
+            assert!(
+                buf[(x, 0)]
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::REVERSED | Modifier::UNDERLINED)
+            );
+        }
     }
 
     #[test]

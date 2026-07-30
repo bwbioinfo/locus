@@ -242,6 +242,9 @@ fn selected_allele_tally_label(tally: &PositionAlleleTally) -> String {
             alleles.push(format!("{}:{count}", base as char));
         }
     }
+    for (sequence, count) in &tally.deletion_counts {
+        alleles.push(format!("-{}:{count}", String::from_utf8_lossy(sequence)));
+    }
     if tally.deletion_count > 0 {
         alleles.push(format!("DEL:{}", tally.deletion_count));
     }
@@ -700,6 +703,7 @@ fn render_reads_track(
             transform,
             show_names: area.width > 80,
             expand_insertions: app.expand_insertions,
+            selected_ref_pos: app.selected_ref_pos,
             show_methylation: app.show_methylation,
             show_phasing: app.show_phasing,
             theme: app.theme,
@@ -1298,13 +1302,14 @@ mod tests {
     fn selected_allele_tally_label_lists_bases_and_indels() {
         let tally = PositionAlleleTally {
             base_counts: BTreeMap::from([(b'A', 3), (b'C', 1)]),
-            deletion_count: 2,
+            deletion_counts: BTreeMap::from([(b"ACT".to_vec(), 2)]),
+            deletion_count: 1,
             insertion_counts: BTreeMap::from([(b"GG".to_vec(), 1)]),
         };
 
         assert_eq!(
             selected_allele_tally_label(&tally),
-            "alleles:A:3 C:1 DEL:2 +GG:1"
+            "alleles:A:3 C:1 -ACT:2 DEL:1 +GG:1"
         );
         assert_eq!(
             selected_allele_tally_label(&PositionAlleleTally::default()),
@@ -1342,8 +1347,12 @@ mod tests {
         let anchor = app.selected_insertion_ref_pos.expect("selected insertion");
         let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
         let transform = genomic_transform(&app, main);
+        let gap = app
+            .selected_insertion_gap(&transform)
+            .expect("visible insertion gap");
+        assert_eq!(anchor, gap.anchor_ref_pos());
         let (left_border, right_border) = transform
-            .insertion_border_cols(anchor)
+            .insertion_border_cols(gap.ref_pos)
             .expect("visible insertion gap");
 
         assert_eq!(

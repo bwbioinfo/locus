@@ -57,6 +57,7 @@ pub struct App {
     pub terminal_cols: u16,
     pub terminal_rows: u16,
     pub expand_insertions: bool,
+    /// 0-based base preceding the insertion selected by Tab navigation.
     pub selected_insertion_ref_pos: Option<u64>,
     /// 0-based genomic position selected with the mouse.
     pub selected_ref_pos: Option<u64>,
@@ -224,7 +225,7 @@ impl App {
 
         let current_idx = self
             .selected_insertion_ref_pos
-            .and_then(|pos| gaps.iter().position(|gap| gap.ref_pos == pos));
+            .and_then(|pos| gaps.iter().position(|gap| gap.anchor_ref_pos() == pos));
         let next_idx = match (current_idx, forward) {
             (Some(idx), true) => (idx + 1) % gaps.len(),
             (Some(0), false) => gaps.len() - 1,
@@ -233,12 +234,12 @@ impl App {
             (None, false) => gaps.len() - 1,
         };
         let gap = gaps[next_idx];
-        self.selected_insertion_ref_pos = Some(gap.ref_pos);
+        self.selected_insertion_ref_pos = Some(gap.anchor_ref_pos());
         self.status_msg = Some(format!(
             "expanded insertion {} bp at {}:{}",
             gap.len,
             self.current_contig(),
-            gap.ref_pos + 1
+            gap.anchor_ref_pos() + 1
         ));
     }
 
@@ -251,7 +252,7 @@ impl App {
             && let Some(gap) = gaps
                 .iter()
                 .copied()
-                .find(|gap| gap.ref_pos == selected_ref_pos)
+                .find(|gap| gap.anchor_ref_pos() == selected_ref_pos)
         {
             return Some(gap);
         }

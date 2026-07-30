@@ -20,6 +20,14 @@ pub struct InsertionGap {
 }
 
 impl InsertionGap {
+    /// 0-based reference base preceding this insertion.
+    ///
+    /// `ref_pos` remains the first reference base after the insertion so the
+    /// visual gap is placed between aligned bases.
+    pub fn anchor_ref_pos(self) -> u64 {
+        self.ref_pos.saturating_sub(1)
+    }
+
     pub fn visual_len(self) -> u64 {
         self.len.saturating_add(2)
     }
@@ -69,7 +77,7 @@ impl ViewTransform {
                 let gap_len = gap.visual_len() as u16;
                 let gap_end = gap_start.saturating_add(gap_len);
                 if (gap_start..gap_end).contains(&col) {
-                    return Some(gap.ref_pos);
+                    return Some(gap.anchor_ref_pos());
                 }
                 if col >= gap_end {
                     col.saturating_sub(gap_len)
@@ -196,10 +204,10 @@ mod tests {
             len: 2,
         }));
 
-        assert_eq!(t.col_to_bp(10), Some(150));
-        assert_eq!(t.col_to_bp(11), Some(150));
-        assert_eq!(t.col_to_bp(12), Some(150));
-        assert_eq!(t.col_to_bp(13), Some(150));
+        assert_eq!(t.col_to_bp(10), Some(149));
+        assert_eq!(t.col_to_bp(11), Some(149));
+        assert_eq!(t.col_to_bp(12), Some(149));
+        assert_eq!(t.col_to_bp(13), Some(149));
         assert_eq!(t.col_to_bp(14), Some(150));
         assert_eq!(t.col_to_bp(15), Some(155));
     }

@@ -85,6 +85,9 @@ pub struct RenderRead {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PositionAlleleTally {
     pub base_counts: BTreeMap<u8, usize>,
+    /// Deleted reference alleles when the corresponding FASTA sequence is available.
+    pub deletion_counts: BTreeMap<Vec<u8>, usize>,
+    /// Deletions whose reference sequence was not available in the cached slice.
     pub deletion_count: usize,
     pub insertion_counts: BTreeMap<Vec<u8>, usize>,
 }
@@ -101,8 +104,12 @@ impl PositionAlleleTally {
         *self.insertion_counts.entry(sequence).or_default() += 1;
     }
 
-    fn add_deletion(&mut self) {
-        self.deletion_count += 1;
+    fn add_deletion(&mut self, sequence: Option<Vec<u8>>) {
+        if let Some(sequence) = sequence {
+            *self.deletion_counts.entry(sequence).or_default() += 1;
+        } else {
+            self.deletion_count += 1;
+        }
     }
 }
 
@@ -153,7 +160,12 @@ impl RenderRead {
         aligned
     }
 
-    fn tally_alleles_at(&self, position: u64, tally: &mut PositionAlleleTally) {
+    fn tally_alleles_at(
+        &self,
+        position: u64,
+        reference: Option<&ReferenceSlice>,
+        tally: &mut PositionAlleleTally,
+    ) {
         let mut read_pos = 0usize;
         let mut ref_pos = self.start;
 
@@ -175,7 +187,7 @@ impl RenderRead {
                     ref_pos = end;
                 }
                 CigarOp::Insertion(n) => {
-                    if ref_pos == position {
+                    if ref_pos.saturating_sub(1) == position {
                         let sequence = (0..n as usize)
                             .map(|offset| {
                                 self.sequence
@@ -192,7 +204,12 @@ impl RenderRead {
                 CigarOp::Deletion(n) => {
                     let end = ref_pos.saturating_add(n);
                     if (ref_pos..end).contains(&position) {
-                        tally.add_deletion();
+                        let sequence = reference.and_then(|reference| {
+                            (ref_pos..end)
+                                .map(|deleted_pos| reference.base_at(deleted_pos))
+                                .collect::<Option<Vec<_>>>()
+                        });
+                        tally.add_deletion(sequence);
                     }
                     ref_pos = end;
                 }
@@ -341,7 +358,7 @@ impl RegionCache {
     pub fn allele_tally_at(&self, position: u64, min_mapq: u8) -> PositionAlleleTally {
         let mut tally = PositionAlleleTally::default();
         for read in self.reads.iter().filter(|read| read.mapq >= min_mapq) {
-            read.tally_alleles_at(position, &mut tally);
+            read.tally_alleles_at(position, self.reference.as_ref(), &mut tally);
         }
         tally
     }
@@ -558,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn allele_tally_counts_bases_snvs_and_indels_without_skips() {
+    fn allele_tally_counts_bases_snvs_and_reference_indels_without_skips() {
         let mut matched = make_read("matched", 100, 103);
         matched.sequence = b"AAA".to_vec();
 
@@ -570,8 +587,8 @@ mod tests {
         inserted.cigar_ops = vec![CigarOp::Match(1), CigarOp::Insertion(2), CigarOp::Match(2)];
         inserted.sequence = b"AGGTC".to_vec();
 
-        let mut deleted = make_read("deleted", 100, 104);
-        deleted.cigar_ops = vec![CigarOp::Match(1), CigarOp::Deletion(2), CigarOp::Match(1)];
+        let mut deleted = make_read("deleted", 100, 105);
+        deleted.cigar_ops = vec![CigarOp::Match(1), CigarOp::Deletion(3), CigarOp::Match(1)];
         deleted.sequence = b"AC".to_vec();
 
         let mut skipped = make_read("skipped", 100, 104);
@@ -584,6 +601,10 @@ mod tests {
 
         let cache = RegionCache {
             reads: vec![matched, mismatch, inserted, deleted, skipped, low_mapq],
+            reference: Some(ReferenceSlice {
+                start: 100,
+                bases: b"AACTG".to_vec(),
+            }),
             ..RegionCache::default()
         };
 
@@ -593,8 +614,15 @@ mod tests {
         assert_eq!(tally.base_counts.get(&b'C'), Some(&1));
         assert_eq!(tally.base_counts.get(&b'T'), Some(&1));
         assert!(!tally.base_counts.contains_key(&b'G'));
-        assert_eq!(tally.deletion_count, 1);
-        assert_eq!(tally.insertion_counts.get(b"GG" as &[u8]), Some(&1));
+        assert_eq!(tally.deletion_counts.get(b"ACT" as &[u8]), Some(&1));
+        assert_eq!(tally.deletion_count, 0);
+        assert!(tally.insertion_counts.is_empty());
+
+        let insertion_tally = cache.allele_tally_at(100, 30);
+        assert_eq!(
+            insertion_tally.insertion_counts.get(b"GG" as &[u8]),
+            Some(&1)
+        );
     }
 
     #[test]
