@@ -60,18 +60,37 @@ fn browser_layout_with_top_bar_height(area: Rect, top_bar_height: u16) -> [Rect;
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(top_bar_height),
-            Constraint::Min(5),
-            Constraint::Length(1),
+            Constraint::Min(MIN_BROWSER_HEIGHT),
+            Constraint::Length(BOTTOM_BAR_HEIGHT),
         ])
         .split(area);
 
     [chunks[0], chunks[1], chunks[2]]
 }
 
-const READ_DETAILS_ROWS: u16 = 2;
+const TOP_BAR_HEADER_HEIGHT: u16 = 1;
+const MIN_BROWSER_HEIGHT: u16 = 5;
+const BOTTOM_BAR_HEIGHT: u16 = 1;
+
+struct TopBarContent {
+    identity: String,
+    selected_info: Option<String>,
+    metrics: String,
+    status: Option<String>,
+    detail_lines: Vec<String>,
+}
 
 fn top_bar_height(app: &App) -> u16 {
-    1 + app.selected_read().map_or(0, |_| READ_DETAILS_ROWS)
+    TOP_BAR_HEADER_HEIGHT.saturating_add(
+        top_bar_content(app, app.terminal_cols as usize)
+            .detail_lines
+            .len() as u16,
+    )
+}
+
+fn max_detail_rows(app: &App) -> usize {
+    app.terminal_rows
+        .saturating_sub(TOP_BAR_HEADER_HEIGHT + MIN_BROWSER_HEIGHT + BOTTOM_BAR_HEIGHT) as usize
 }
 
 const RULER_HEIGHT: u16 = 2;
@@ -235,9 +254,67 @@ fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
 }
 
 fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let width = area.width as usize;
+    let top_bar = top_bar_content(app, width);
+
+    let used = top_bar.identity.len()
+        + top_bar.selected_info.as_ref().map_or(0, String::len)
+        + top_bar.metrics.len()
+        + top_bar.status.as_ref().map_or(0, String::len);
+    let pad_len = width.saturating_sub(used);
+
+    let mut spans = vec![Span::styled(
+        top_bar.identity,
+        Style::default()
+            .fg(app.theme.top_bar_identity_fg())
+            .bg(app.theme.top_bar_identity_bg())
+            .add_modifier(Modifier::BOLD),
+    )];
+
+    if let Some(selected_info) = top_bar.selected_info {
+        spans.push(Span::styled(
+            selected_info,
+            Style::default()
+                .fg(app.theme.selected_info_fg())
+                .bg(app.theme.selected_info_bg())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    spans.push(Span::raw(" ".repeat(pad_len)));
+    spans.push(Span::styled(
+        top_bar.metrics,
+        Style::default().fg(app.theme.top_bar_fg()),
+    ));
+
+    if let Some(status) = top_bar.status {
+        spans.push(Span::styled(
+            status,
+            Style::default().fg(app.theme.status_fg()),
+        ));
+    }
+
+    let mut lines = vec![Line::from(spans)];
+    lines.extend(top_bar.detail_lines.into_iter().map(|detail| {
+        let padding = width.saturating_sub(detail.chars().count());
+        Line::from(Span::styled(
+            format!("{detail}{}", " ".repeat(padding)),
+            Style::default()
+                .fg(app.theme.selected_info_fg())
+                .bg(app.theme.selected_info_bg())
+                .add_modifier(Modifier::BOLD),
+        ))
+    }));
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.theme.top_bar_bg())),
+        area,
+    );
+}
+
+fn top_bar_content(app: &App, width: usize) -> TopBarContent {
     let bp_per_col = app.view_span() as f64 / app.view_cols().max(1) as f64;
     let read_count = app.cache.pileup_rows.iter().map(Vec::len).sum::<usize>();
-    let width = area.width as usize;
     let file_name = app
         .source
         .path
@@ -257,30 +334,12 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     let phasing_mode = phasing_mode_label(app.show_phasing);
     let theme_mode = theme_mode_label(app.theme);
     let mapq_filter = mapq_filter_label(app.min_mapq);
-    let selected_read_details = app
+    let read_details = app
         .selected_read()
         .map(|read| selected_read_label(app.current_contig(), read));
-    let selected_info = selected_read_details
-        .as_ref()
+    let position_details = read_details
         .is_none()
-        .then(|| {
-            selected_position_label(app.current_contig(), app.selected_ref_pos).map(|position| {
-                let tally = if app.show_phasing {
-                    app.selected_phase_allele_tallies
-                        .as_ref()
-                        .map(phase_allele_tallies_label)
-                        .unwrap_or_else(|| {
-                            "HP1[none;m0/u0/r0] HP2[none;m0/u0/r0] U[none;m0/u0/r0]".to_string()
-                        })
-                } else {
-                    app.selected_allele_tally
-                        .as_ref()
-                        .map(selected_allele_tally_label)
-                        .unwrap_or_else(|| "alleles:none meth:0 unmod:0 reads:0".to_string())
-                };
-                format!(" SEL {position}  {tally} ")
-            })
-        })
+        .then(|| selected_position_details(app))
         .flatten();
     let metrics = format!(
         " {}  reads:{}  {}  scale:{:.1} bp/col  {}  {}  {}  {} ",
@@ -294,73 +353,54 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         theme_mode
     );
     let status = app.status_msg.as_ref().map(|msg| format!(" status:{msg} "));
+    let inline_position_details = position_details.as_ref().is_some_and(|details| {
+        let (_, inline, _, _) =
+            fit_top_bar(&identity, Some(details), &metrics, status.as_deref(), width);
+        inline.as_deref() == Some(details.as_str())
+    });
+    let details = read_details.as_deref().or_else(|| {
+        (!inline_position_details)
+            .then_some(position_details.as_deref())
+            .flatten()
+    });
     let (identity, selected_info, metrics, status) = fit_top_bar(
         &identity,
-        selected_info.as_deref(),
+        inline_position_details
+            .then_some(position_details.as_deref())
+            .flatten(),
         &metrics,
         status.as_deref(),
         width,
     );
 
-    let used = identity.len()
-        + selected_info.as_ref().map_or(0, String::len)
-        + metrics.len()
-        + status.as_ref().map_or(0, String::len);
-    let pad_len = width.saturating_sub(used);
-
-    let mut spans = vec![Span::styled(
+    TopBarContent {
         identity,
-        Style::default()
-            .fg(app.theme.top_bar_identity_fg())
-            .bg(app.theme.top_bar_identity_bg())
-            .add_modifier(Modifier::BOLD),
-    )];
-
-    if let Some(selected_info) = selected_info {
-        spans.push(Span::styled(
-            selected_info,
-            Style::default()
-                .fg(app.theme.selected_info_fg())
-                .bg(app.theme.selected_info_bg())
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-
-    spans.push(Span::raw(" ".repeat(pad_len)));
-    spans.push(Span::styled(
+        selected_info,
         metrics,
-        Style::default().fg(app.theme.top_bar_fg()),
-    ));
-
-    if let Some(status) = status {
-        spans.push(Span::styled(
-            status,
-            Style::default().fg(app.theme.status_fg()),
-        ));
+        status,
+        detail_lines: details
+            .map(|details| bounded_detail_lines(details, width, max_detail_rows(app)))
+            .unwrap_or_default(),
     }
+}
 
-    let mut lines = vec![Line::from(spans)];
-    if let Some(read_details) = selected_read_details {
-        lines.extend(
-            selected_read_detail_lines(&read_details, width)
-                .into_iter()
-                .map(|detail| {
-                    let padding = width.saturating_sub(detail.chars().count());
-                    Line::from(Span::styled(
-                        format!("{detail}{}", " ".repeat(padding)),
-                        Style::default()
-                            .fg(app.theme.selected_info_fg())
-                            .bg(app.theme.selected_info_bg())
-                            .add_modifier(Modifier::BOLD),
-                    ))
-                }),
-        );
-    }
-
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(app.theme.top_bar_bg())),
-        area,
-    );
+fn selected_position_details(app: &App) -> Option<String> {
+    selected_position_label(app.current_contig(), app.selected_ref_pos).map(|position| {
+        let tally = if app.show_phasing {
+            app.selected_phase_allele_tallies
+                .as_ref()
+                .map(phase_allele_tallies_label)
+                .unwrap_or_else(|| {
+                    "HP1[none;m0/u0/r0] HP2[none;m0/u0/r0] U[none;m0/u0/r0]".to_string()
+                })
+        } else {
+            app.selected_allele_tally
+                .as_ref()
+                .map(selected_allele_tally_label)
+                .unwrap_or_else(|| "alleles:none meth:0 unmod:0 reads:0".to_string())
+        };
+        format!(" SEL {position}  {tally} ")
+    })
 }
 
 fn selected_read_label(contig: &str, read: &RenderRead) -> String {
@@ -404,9 +444,9 @@ fn selected_read_label(contig: &str, read: &RenderRead) -> String {
     )
 }
 
-fn selected_read_detail_lines(details: &str, width: usize) -> Vec<String> {
+fn bounded_detail_lines(details: &str, width: usize, max_rows: usize) -> Vec<String> {
     if width == 0 {
-        return vec![String::new(); READ_DETAILS_ROWS as usize];
+        return Vec::new();
     }
 
     let mut lines = details
@@ -419,10 +459,12 @@ fn selected_read_detail_lines(details: &str, width: usize) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let truncated = lines.len() > READ_DETAILS_ROWS as usize;
-    lines.truncate(READ_DETAILS_ROWS as usize);
+    let truncated = lines.len() > max_rows;
+    lines.truncate(max_rows);
     if truncated {
-        let last = lines.last_mut().expect("two read-detail rows remain");
+        let Some(last) = lines.last_mut() else {
+            return lines;
+        };
         *last = format!(
             "{}~",
             last.chars()
@@ -430,7 +472,6 @@ fn selected_read_detail_lines(details: &str, width: usize) -> Vec<String> {
                 .collect::<String>()
         );
     }
-    lines.resize(READ_DETAILS_ROWS as usize, String::new());
     lines
 }
 
@@ -1761,14 +1802,71 @@ mod tests {
     }
 
     #[test]
-    fn selected_read_detail_lines_preserve_two_structured_rows() {
+    fn bounded_detail_lines_wrap_without_a_fixed_two_row_limit() {
         assert_eq!(
-            selected_read_detail_lines("READ read-1\nCIGAR:10M  phase:HP1", 40),
+            bounded_detail_lines("READ read-1\nCIGAR:10M  phase:HP1", 40, 10),
             vec!["READ read-1", "CIGAR:10M  phase:HP1"]
         );
         assert_eq!(
-            selected_read_detail_lines("123456789\nCIGAR:10M", 8),
-            vec!["12345678", "9~"]
+            bounded_detail_lines("123456789\nCIGAR:10M", 8, 10),
+            vec!["12345678", "9", "CIGAR:10", "M"]
+        );
+        assert_eq!(
+            bounded_detail_lines("123456789\nCIGAR:10M", 8, 3),
+            vec!["12345678", "9", "CIGAR:1~"]
+        );
+    }
+
+    #[test]
+    fn long_selected_base_tally_uses_wrapped_detail_rows_only_when_needed() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 110;
+        app.terminal_rows = 24;
+        app.selected_ref_pos = Some(app.view_start);
+        app.selected_allele_tally = Some(PositionAlleleTally::default());
+
+        let short_selection = top_bar_content(&app, app.terminal_cols as usize);
+        assert!(short_selection.selected_info.is_some());
+        assert!(short_selection.detail_lines.is_empty());
+        assert_eq!(top_bar_height(&app), 1);
+
+        app.terminal_cols = 40;
+        app.selected_allele_tally = Some(PositionAlleleTally {
+            deletion_counts: BTreeMap::from([(b"ATCG".repeat(24), 1)]),
+            ..PositionAlleleTally::default()
+        });
+
+        let long_selection = top_bar_content(&app, app.terminal_cols as usize);
+        assert!(long_selection.selected_info.is_none());
+        assert!(long_selection.detail_lines.len() > 2);
+        assert!(long_selection.detail_lines.concat().contains("-ATCG"));
+        assert_eq!(
+            top_bar_height(&app) as usize,
+            TOP_BAR_HEADER_HEIGHT as usize + long_selection.detail_lines.len()
+        );
+    }
+
+    #[test]
+    fn long_selected_read_cigar_expands_beyond_two_detail_rows() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 30;
+        app.terminal_rows = 24;
+        let mut read = phase_read("long-cigar", 100, Some(50));
+        read.cigar_ops = vec![CigarOp::Match(1); 80];
+        app.cache.reads = vec![read];
+
+        app.select_read(0);
+
+        let details = top_bar_content(&app, app.terminal_cols as usize);
+        assert!(details.detail_lines.len() > 2);
+        assert!(details.detail_lines.concat().contains("CIGAR:1M1M"));
+        assert_eq!(
+            top_bar_height(&app) as usize,
+            TOP_BAR_HEADER_HEIGHT as usize + details.detail_lines.len()
         );
     }
 
@@ -1985,10 +2083,10 @@ mod tests {
         app.show_selection_brackets = false;
         app.refresh().expect("load demo reads");
 
-        let [_, main, _] =
-            app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
-        let transform = genomic_transform(&app, main);
         for deleted_position in 62..64 {
+            let [_, main, _] =
+                app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+            let transform = genomic_transform(&app, main);
             let column = transform
                 .bp_to_col(deleted_position)
                 .expect("deletion column");
