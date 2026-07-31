@@ -326,6 +326,11 @@ impl App {
         }
     }
 
+    /// Clear the selected reference position, its tallies, and any selected insertion anchor.
+    pub fn clear_selected_position(&mut self) {
+        self.clear_selected_reference_position();
+    }
+
     fn base_view_transform(&self) -> ViewTransform {
         ViewTransform::new(
             self.view_start,
@@ -820,6 +825,7 @@ impl App {
 
     fn clear_selected_reference_position(&mut self) {
         self.selected_ref_pos = None;
+        self.selected_insertion_ref_pos = None;
         self.selected_allele_tally = None;
         self.selected_phase_allele_tallies = None;
     }

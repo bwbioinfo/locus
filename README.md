@@ -112,7 +112,7 @@ To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capt
 | `r` | Refresh current region |
 | `s` | Save ANSI text and HTML screenshots to `screenshots/` |
 | `?` | Toggle help overlay |
-| `Esc` | Cancel input |
+| `Esc` | Clear selected position; cancel input or dismiss help |
 | `Enter` | Confirm input |
 
 ## UI Layout

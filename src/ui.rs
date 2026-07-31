@@ -876,9 +876,9 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
     let keys = match app.mode {
         Mode::Normal => {
             if app.gff.is_some() {
-                " q:quit  ←/→:pan  Shift+←/→:1kb  Shift+↑/↓:scroll  Ctrl+↑/↓:track  +/-:zoom  i:insertions  b:brackets  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  Shift+←/→:1kb  Shift+↑/↓:scroll  Ctrl+↑/↓:track  +/-:zoom  i:insertions  b:brackets  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  Esc:clear  ?:help"
             } else {
-                " q:quit  ←/→:pan  Shift+←/→:1kb  Shift+↑/↓:scroll  Ctrl+↑/↓:track  +/-:zoom  i:insertions  b:brackets  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  Shift+←/→:1kb  Shift+↑/↓:scroll  Ctrl+↑/↓:track  +/-:zoom  i:insertions  b:brackets  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  Esc:clear  ?:help"
             }
         }
         Mode::GoTo => " Enter:confirm  Esc:cancel",
@@ -1069,6 +1069,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         Line::from("  Ctrl+↑/↓   Select previous / next phased read track"),
         Line::from("  Mouse wheel Scroll read track under pointer"),
         Line::from("  Left click Select genomic position and highlight read bases"),
+        Line::from("  Esc        Clear selected position"),
         Line::from("  b          Toggle fluorescent selection brackets"),
         Line::from("  i          Toggle expanded insertion sequence"),
         Line::from("  m          Toggle read methylation"),

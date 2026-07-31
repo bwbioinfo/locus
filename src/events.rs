@@ -105,6 +105,8 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Char('?') => app.show_help = !app.show_help,
+        KeyCode::Esc if app.show_help => app.show_help = false,
+        KeyCode::Esc => app.clear_selected_position(),
 
         KeyCode::Char('h') | KeyCode::Left => app.pan(-(step as i64)),
         KeyCode::Char('l') | KeyCode::Right => app.pan(step as i64),
@@ -298,6 +300,44 @@ mod tests {
 
         assert!(!app.show_selection_brackets);
         assert!(!app.needs_fetch);
+    }
+
+    #[test]
+    fn escape_clears_selected_position_without_refetching() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        let selected = app.view_start;
+        app.show_phasing = true;
+        app.select_reference_position(selected);
+        app.selected_insertion_ref_pos = Some(selected);
+        app.needs_fetch = false;
+
+        handle_normal(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("clear selection");
+
+        assert!(app.selected_ref_pos.is_none());
+        assert!(app.selected_insertion_ref_pos.is_none());
+        assert!(app.selected_allele_tally.is_none());
+        assert!(app.selected_phase_allele_tallies.is_none());
+        assert!(!app.needs_fetch);
+    }
+
+    #[test]
+    fn escape_dismisses_help_without_clearing_selected_position() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        let selected = app.view_start;
+        app.select_reference_position(selected);
+        app.show_help = true;
+
+        handle_normal(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("dismiss help");
+
+        assert!(!app.show_help);
+        assert_eq!(app.selected_ref_pos, Some(selected));
+        assert!(app.selected_allele_tally.is_some());
     }
 
     #[test]
