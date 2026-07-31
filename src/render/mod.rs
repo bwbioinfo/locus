@@ -4,6 +4,9 @@ pub mod reads;
 pub mod reference;
 pub mod ruler;
 
+/// Maximum base pairs per terminal column at which individual bases are rendered.
+pub const BASE_RENDER_THRESHOLD: f64 = 5.0;
+
 /// Maps between genomic coordinates and terminal columns.
 #[derive(Clone, Copy)]
 pub struct ViewTransform {

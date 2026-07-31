@@ -9,10 +9,7 @@ use crate::cache::{AlignedModifiedBaseCall, CigarOp, PileupRow, RenderRead, Stra
 use crate::reference::ReferenceSlice;
 use crate::theme::Theme;
 
-use super::{InsertionGap, ViewTransform};
-
-/// Show individual bases when the view is this many bp per column or narrower.
-const BASE_RENDER_THRESHOLD: f64 = 5.0;
+use super::{BASE_RENDER_THRESHOLD, InsertionGap, ViewTransform};
 
 #[derive(Debug, Clone, Copy)]
 struct InsertionEvent {

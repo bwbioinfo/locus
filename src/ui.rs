@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use crate::render::{
-    ViewTransform,
+    BASE_RENDER_THRESHOLD, ViewTransform,
     coverage::CoverageTrack,
     features::FeaturesTrack,
     reads::{ReadsTrack, SelectedPositionOverlay},
@@ -418,7 +418,8 @@ fn genomic_transform(app: &App, area: Rect) -> ViewTransform {
     let base_transform =
         ViewTransform::new(app.view_start, app.view_end, area.width.saturating_sub(2));
     let insertion_gap = app.selected_insertion_gap(&base_transform);
-    let show_selection_brackets = app.show_selection_brackets && base_transform.bp_per_col() <= 1.0;
+    let show_selection_brackets =
+        app.show_selection_brackets && base_transform.bp_per_col() <= BASE_RENDER_THRESHOLD;
     let selected_insertion = show_selection_brackets
         && app.selected_ref_pos.is_some_and(|selected_ref_pos| {
             insertion_gap.is_some_and(|gap| gap.anchor_ref_pos() == selected_ref_pos)
@@ -1420,5 +1421,28 @@ mod tests {
         app.toggle_selection_brackets();
         let unbracketed_transform = genomic_transform(&app, main);
         assert_eq!(unbracketed_transform.insertion_bracket_count(), 1);
+    }
+
+    #[test]
+    fn selection_brackets_follow_the_base_render_threshold() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.view_start = 0;
+        app.selected_ref_pos = Some(10);
+
+        app.view_end = 25;
+        let base_visible = genomic_transform(&app, Rect::new(0, 0, 7, 1));
+        assert_eq!(base_visible.bp_per_col(), BASE_RENDER_THRESHOLD);
+        assert_eq!(base_visible.selection_bracket, Some(10));
+
+        app.view_end = 26;
+        let too_wide = genomic_transform(&app, Rect::new(0, 0, 7, 1));
+        assert_eq!(too_wide.selection_bracket, None);
+
+        app.view_end = 25;
+        app.toggle_selection_brackets();
+        let disabled = genomic_transform(&app, Rect::new(0, 0, 7, 1));
+        assert_eq!(disabled.selection_bracket, None);
     }
 }
