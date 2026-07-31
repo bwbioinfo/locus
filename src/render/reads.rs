@@ -9,11 +9,7 @@ use crate::cache::{AlignedModifiedBaseCall, CigarOp, PileupRow, RenderRead, Stra
 use crate::reference::ReferenceSlice;
 use crate::theme::Theme;
 
-use super::{InsertionGap, ViewTransform};
-
-/// Show individual bases when the view is this many bp per column or narrower.
-const BASE_RENDER_THRESHOLD: f64 = 5.0;
-const INSERTION_EXPAND_THRESHOLD: f64 = 1.0;
+use super::{BASE_RENDER_THRESHOLD, InsertionGap, ViewTransform};
 
 #[derive(Debug, Clone, Copy)]
 struct InsertionEvent {
@@ -30,6 +26,7 @@ pub struct ReadsTrack<'a> {
     #[allow(dead_code)]
     pub show_names: bool,
     pub expand_insertions: bool,
+    pub selected_ref_pos: Option<u64>,
     pub show_methylation: bool,
     pub show_phasing: bool,
     pub theme: Theme,
@@ -39,6 +36,7 @@ pub struct ReadsTrack<'a> {
 pub struct SelectedPositionOverlay {
     pub selected_ref_pos: Option<u64>,
     pub transform: ViewTransform,
+    pub theme: Theme,
 }
 
 impl Widget for SelectedPositionOverlay {
@@ -54,17 +52,42 @@ impl Widget for SelectedPositionOverlay {
             return;
         }
 
+        let bracket_cols = self.transform.selection_bracket_cols();
         for y in area.y..area.y.saturating_add(area.height) {
-            let Some(cell) = buf.cell_mut((x, y)) else {
-                continue;
+            let occupied = if let Some(cell) = buf.cell_mut((x, y)) {
+                if cell.symbol().trim().is_empty() {
+                    false
+                } else {
+                    let style = cell
+                        .style()
+                        .add_modifier(Modifier::REVERSED | Modifier::UNDERLINED);
+                    cell.set_style(style);
+                    true
+                }
+            } else {
+                false
             };
-            if cell.symbol().trim().is_empty() {
+            if !occupied {
                 continue;
             }
-            let style = cell
-                .style()
-                .add_modifier(Modifier::REVERSED | Modifier::UNDERLINED);
-            cell.set_style(style);
+            if let Some((left_col, right_col)) = bracket_cols {
+                draw_bracket(
+                    left_col,
+                    y,
+                    '[',
+                    selection_bracket_style(self.theme),
+                    area,
+                    buf,
+                );
+                draw_bracket(
+                    right_col,
+                    y,
+                    ']',
+                    selection_bracket_style(self.theme),
+                    area,
+                    buf,
+                );
+            }
         }
     }
 }
@@ -94,6 +117,7 @@ impl<'a> Widget for ReadsTrack<'a> {
                         area,
                         transform: &self.transform,
                         expand_insertions: self.expand_insertions,
+                        selected_ref_pos: self.selected_ref_pos,
                         show_methylation: self.show_methylation,
                         show_phasing: self.show_phasing,
                         theme: self.theme,
@@ -120,7 +144,7 @@ pub fn selected_insertion_gap(
     rows: &[PileupRow],
     transform: &ViewTransform,
 ) -> Option<InsertionGap> {
-    if transform.bp_per_col() > INSERTION_EXPAND_THRESHOLD {
+    if transform.bp_per_col() > BASE_RENDER_THRESHOLD {
         return None;
     }
 
@@ -135,7 +159,7 @@ pub fn visible_insertion_gaps(
     rows: &[PileupRow],
     transform: &ViewTransform,
 ) -> Vec<InsertionGap> {
-    if transform.bp_per_col() > INSERTION_EXPAND_THRESHOLD {
+    if transform.bp_per_col() > BASE_RENDER_THRESHOLD {
         return Vec::new();
     }
 
@@ -175,6 +199,7 @@ struct BaseRenderContext<'a> {
     area: Rect,
     transform: &'a ViewTransform,
     expand_insertions: bool,
+    selected_ref_pos: Option<u64>,
     show_methylation: bool,
     show_phasing: bool,
     theme: Theme,
@@ -368,8 +393,11 @@ fn render_inserted_bases(
         if x < context.area.x + context.area.width
             && let Some(cell) = buf.cell_mut((x, context.y))
         {
-            cell.set_char(base as char)
-                .set_style(insertion_base_style(base, context.theme));
+            let mut style = insertion_base_style(base, context.theme);
+            if context.selected_ref_pos == Some(insertion.ref_pos.saturating_sub(1)) {
+                style = style.add_modifier(Modifier::REVERSED | Modifier::UNDERLINED);
+            }
+            cell.set_char(base as char).set_style(style);
         }
     }
 }
@@ -379,19 +407,37 @@ fn draw_insertion_box(insertion_ref_pos: u64, context: BaseRenderContext<'_>, bu
     else {
         return;
     };
-    let style = insertion_box_style(context.theme);
-    let left_x = context.area.x + left_col;
-    let right_x = context.area.x + right_col;
-
-    if left_x < context.area.x + context.area.width
-        && let Some(cell) = buf.cell_mut((left_x, context.y))
-    {
-        cell.set_char('[').set_style(style);
+    for offset in 0..context.transform.insertion_bracket_count() {
+        let style = if context.transform.insertion_bracket_count() > 1 && offset == 0 {
+            selection_bracket_style(context.theme)
+        } else {
+            insertion_box_style(context.theme)
+        };
+        draw_bracket(
+            left_col.saturating_add(offset),
+            context.y,
+            '[',
+            style,
+            context.area,
+            buf,
+        );
+        draw_bracket(
+            right_col.saturating_sub(offset),
+            context.y,
+            ']',
+            style,
+            context.area,
+            buf,
+        );
     }
-    if right_x < context.area.x + context.area.width
-        && let Some(cell) = buf.cell_mut((right_x, context.y))
+}
+
+fn draw_bracket(col: u16, y: u16, bracket: char, style: Style, area: Rect, buf: &mut Buffer) {
+    let x = area.x.saturating_add(col);
+    if x < area.x.saturating_add(area.width)
+        && let Some(cell) = buf.cell_mut((x, y))
     {
-        cell.set_char(']').set_style(style);
+        cell.set_char(bracket).set_style(style);
     }
 }
 
@@ -582,6 +628,12 @@ fn insertion_box_style(theme: Theme) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+fn selection_bracket_style(theme: Theme) -> Style {
+    Style::default()
+        .fg(theme.selection_bracket_fg())
+        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+}
+
 fn insertion_boundary_style(style: Style) -> Style {
     style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
 }
@@ -770,6 +822,7 @@ mod tests {
                 area,
                 transform,
                 expand_insertions,
+                selected_ref_pos: None,
                 show_methylation,
                 show_phasing: false,
                 theme,
@@ -787,29 +840,36 @@ mod tests {
     }
 
     #[test]
-    fn selected_position_overlay_marks_only_occupied_read_cells() {
-        let area = Rect::new(0, 0, 4, 2);
-        let transform = ViewTransform::new(100, 104, 4);
+    fn selected_position_overlay_marks_occupied_read_cells_with_brackets() {
+        let area = Rect::new(0, 0, 6, 2);
+        let transform = ViewTransform::new(100, 104, 6).with_selection_bracket(Some(102));
         let mut buf = Buffer::empty(area);
-        buf[(2, 0)]
+        buf[(4, 0)]
             .set_char('A')
             .set_style(Style::default().fg(Color::Green));
 
         SelectedPositionOverlay {
             selected_ref_pos: Some(102),
             transform,
+            theme: Theme::Dark,
         }
         .render(area, &mut buf);
 
         assert!(
-            buf[(2, 0)]
+            buf[(4, 0)]
                 .style()
                 .add_modifier
                 .contains(Modifier::REVERSED | Modifier::UNDERLINED)
         );
-        assert_eq!(buf[(2, 0)].style().fg, Some(Color::Green));
-        assert!(buf[(2, 1)].symbol().trim().is_empty());
-        assert!(buf[(2, 1)].style().add_modifier.is_empty());
+        assert_eq!(buf[(4, 0)].style().fg, Some(Color::Green));
+        assert_eq!(buf[(3, 0)].symbol(), "[");
+        assert_eq!(buf[(5, 0)].symbol(), "]");
+        assert_eq!(
+            buf[(3, 0)].style().fg,
+            Some(Theme::Dark.selection_bracket_fg())
+        );
+        assert!(buf[(3, 1)].symbol().trim().is_empty());
+        assert!(buf[(5, 1)].style().add_modifier.is_empty());
     }
 
     #[test]
@@ -910,6 +970,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(1), CigarOp::Match(2)],
             sequence: b"ACGTA".to_vec(),
             methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
             phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
@@ -946,6 +1007,72 @@ mod tests {
     }
 
     #[test]
+    fn selected_expanded_insertion_highlights_anchor_and_inserted_bases() {
+        let read = RenderRead {
+            name: "read-with-ins".to_string(),
+            start: 10,
+            end: 13,
+            strand: Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(2), CigarOp::Match(1)],
+            sequence: b"ACGGT".to_vec(),
+            methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
+            phase: ReadPhase::default(),
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        };
+        let area = Rect::new(0, 0, 10, 1);
+        let transform = ViewTransform::new(10, 20, 10)
+            .with_insertion_gap(Some(InsertionGap {
+                ref_pos: 12,
+                len: 2,
+            }))
+            .with_double_insertion_brackets(true);
+        let mut buf = Buffer::empty(area);
+
+        render_bases(
+            &read,
+            BaseRenderContext {
+                reference: None,
+                y: 0,
+                area,
+                transform: &transform,
+                expand_insertions: true,
+                selected_ref_pos: Some(11),
+                show_methylation: false,
+                show_phasing: false,
+                theme: Theme::Dark,
+            },
+            &mut buf,
+        );
+        SelectedPositionOverlay {
+            selected_ref_pos: Some(11),
+            transform,
+            theme: Theme::Dark,
+        }
+        .render(area, &mut buf);
+
+        for x in [1, 4, 5] {
+            assert!(
+                buf[(x, 0)]
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::REVERSED | Modifier::UNDERLINED)
+            );
+        }
+        assert_eq!(buf[(2, 0)].symbol(), "[");
+        assert_eq!(buf[(3, 0)].symbol(), "[");
+        assert_eq!(buf[(6, 0)].symbol(), "]");
+        assert_eq!(buf[(7, 0)].symbol(), "]");
+        assert_eq!(
+            buf[(2, 0)].style().fg,
+            Some(Theme::Dark.selection_bracket_fg())
+        );
+    }
+
+    #[test]
     fn compact_insertions_are_overlaid_after_following_bases() {
         let read = RenderRead {
             name: "read-with-ins".to_string(),
@@ -956,6 +1083,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(2), CigarOp::Match(1)],
             sequence: b"ACGGG".to_vec(),
             methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
             phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
@@ -982,6 +1110,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(4), CigarOp::Insertion(1), CigarOp::Match(1)],
             sequence: b"ACGTTA".to_vec(),
             methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
             phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
@@ -1002,6 +1131,7 @@ mod tests {
             ],
             sequence: b"ACGGTTAAAA".to_vec(),
             methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
             phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
@@ -1029,6 +1159,38 @@ mod tests {
     }
 
     #[test]
+    fn insertions_expand_at_every_base_visible_zoom_level() {
+        let read = RenderRead {
+            name: "read-with-ins".to_string(),
+            start: 10,
+            end: 15,
+            strand: Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(2), CigarOp::Match(3)],
+            sequence: b"ACGGTAC".to_vec(),
+            methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
+            phase: ReadPhase::default(),
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        };
+        let reads = vec![read];
+        let rows = vec![vec![0]];
+        let base_visible = ViewTransform::new(10, 15, 5);
+        let too_wide = ViewTransform::new(10, 16, 5);
+
+        assert_eq!(base_visible.bp_per_col(), BASE_RENDER_THRESHOLD);
+        assert_eq!(
+            visible_insertion_gaps(&reads, &rows, &base_visible).len(),
+            1
+        );
+        assert!(selected_insertion_gap(&reads, &rows, &base_visible).is_some());
+        assert!(visible_insertion_gaps(&reads, &rows, &too_wide).is_empty());
+        assert!(selected_insertion_gap(&reads, &rows, &too_wide).is_none());
+    }
+
+    #[test]
     fn expanded_insertions_shift_by_selected_gap_only() {
         let read = RenderRead {
             name: "read-with-two-ins".to_string(),
@@ -1045,6 +1207,7 @@ mod tests {
             ],
             sequence: b"ACGTGA".to_vec(),
             methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
             phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
@@ -1092,6 +1255,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(4)],
             sequence: b"ACGT".to_vec(),
             methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
             phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
@@ -1127,6 +1291,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(2), CigarOp::Insertion(2), CigarOp::Match(1)],
             sequence: b"ACGGG".to_vec(),
             methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
             phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
@@ -1162,6 +1327,7 @@ mod tests {
                 modification: "m".to_string(),
                 probability: Some(240),
             }],
+            deleted_reference_sequences: Vec::new(),
             phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
@@ -1201,6 +1367,7 @@ mod tests {
                 modification: "m".to_string(),
                 probability: Some(40),
             }],
+            deleted_reference_sequences: Vec::new(),
             phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,

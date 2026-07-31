@@ -25,6 +25,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use app::App;
 use bam::BamSource;
 use cli::{Args, Command};
+use error::LocusError;
 use gff::{GffStore, prepare_indexed_annotation};
 use reference::ReferenceStore;
 use region::parse_region;
@@ -54,18 +55,16 @@ fn main() -> Result<()> {
 
     let source = BamSource::open(bam).with_context(|| format!("opening {bam}"))?;
 
-    let initial_region = if let Some(ref r) = args.region {
-        let parsed = parse_region(r)?;
-        let resolved = source.resolve_region(&parsed)?;
-        Some(resolved)
-    } else {
-        source.first_mapped_region()?
-    };
-
     let gff = if let Some(ref path) = args.gff {
         Some(GffStore::load(path).with_context(|| format!("loading annotation {path}"))?)
     } else {
         None
+    };
+
+    let initial_region = if let Some(ref region) = args.region {
+        Some(resolve_initial_region(region, &source, gff.as_ref())?)
+    } else {
+        source.first_mapped_region()?
     };
 
     let reference = if let Some(ref path) = args.reference {
@@ -108,6 +107,25 @@ fn main() -> Result<()> {
     result
 }
 
+fn resolve_initial_region(
+    query: &str,
+    source: &BamSource,
+    gff: Option<&GffStore>,
+) -> Result<region::Region> {
+    let parsed = parse_region(query)?;
+    if query.contains(':') || source.contig_len(&parsed.contig).is_some() {
+        return source.resolve_region(&parsed);
+    }
+
+    let Some(gff) = gff else {
+        return source.resolve_region(&parsed);
+    };
+    let feature = gff
+        .resolve_feature(query)
+        .ok_or_else(|| LocusError::UnknownFeature(query.to_string()))?;
+    source.resolve_region(&feature.padded_region())
+}
+
 fn run<B>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()>
 where
     B: ratatui::backend::Backend,
@@ -128,4 +146,61 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    fn demo_source() -> BamSource {
+        BamSource::open(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam"))
+            .expect("open demo BAM")
+    }
+
+    fn demo_gff() -> GffStore {
+        GffStore::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.gff"))
+            .expect("open demo GFF")
+    }
+
+    #[test]
+    fn startup_region_resolves_a_feature_name_from_annotations() {
+        let source = demo_source();
+        let gff = demo_gff();
+
+        let region = resolve_initial_region("demo1", &source, Some(&gff)).expect("resolve feature");
+
+        assert_eq!(region, region::Region::new("chrDemo", 36, 128));
+    }
+
+    #[test]
+    fn startup_region_keeps_coordinate_and_contig_inputs() {
+        let source = demo_source();
+        let gff = demo_gff();
+
+        assert_eq!(
+            resolve_initial_region("chrDemo:50-60", &source, Some(&gff)).expect("coordinate"),
+            region::Region::new("chrDemo", 49, 60)
+        );
+        assert_eq!(
+            resolve_initial_region("chrDemo", &source, Some(&gff)).expect("contig"),
+            region::Region::new("chrDemo", 0, 154)
+        );
+    }
+
+    #[test]
+    fn startup_region_reports_an_unknown_annotation_feature() {
+        let source = demo_source();
+        let gff = demo_gff();
+
+        let error = resolve_initial_region("NO_SUCH_FEATURE", &source, Some(&gff))
+            .expect_err("unknown feature should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Unknown feature: NO_SUCH_FEATURE")
+        );
+    }
 }

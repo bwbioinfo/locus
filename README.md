@@ -33,6 +33,9 @@ locus sample.bam --reference hg38.fa
 # With annotations for feature rendering and gene search
 locus sample.bam --gff hg38.ncbiRefSeq.gtf.gz
 
+# With annotations, -r can also open a feature by name (case-insensitive)
+locus sample.bam --gff hg38.ncbiRefSeq.gtf.gz -r RB1
+
 # Start in light mode
 locus sample.bam --light
 
@@ -46,6 +49,7 @@ locus prepare-annotations hg38.ncbiRefSeq.gtf --output hg38.ncbiRefSeq.sorted.gt
 The BAM must be coordinate-sorted and indexed (`.bai` file beside it).
 When `--region` is omitted, locus opens a 1,000 bp window around the first mapped read.
 Annotation files can be GFF3 or GTF, plain text or gzip/BGZF-compressed.
+With `--gff`, a bare `--region`/`-r` value that is not a BAM contig resolves to an annotation feature name; exact names take precedence and gene records are preferred over child features.
 If a BGZF-compressed annotation has a `.tbi` sidecar, visible feature rendering uses indexed region queries.
 Reference FASTA files use a `.fai` index when present; plain or gzip-compressed FASTA can also be loaded directly.
 
@@ -86,13 +90,18 @@ To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capt
 | Key | Action |
 |-----|--------|
 | `q` | Quit |
-| `h` / `←` | Pan left (small step) |
-| `l` / `→` | Pan right (small step) |
-| `H` | Pan left (large step) |
-| `L` | Pan right (large step) |
+| `h` / `←` | Pan left (small step), or move the selected base left one bp |
+| `l` / `→` | Pan right (small step), or move the selected base right one bp |
+| `Shift+←` / `H` | Pan left 1,000 bp |
+| `Shift+→` / `L` | Pan right 1,000 bp |
 | `+` / `=` | Zoom in |
 | `-` | Zoom out |
 | Left click | Select a genomic position and highlight occupied read cells |
+| Shift+click | Select a read and show multi-line alignment details |
+| Mouse wheel | Scroll the read rows under the pointer; chooses that phased section in phase view |
+| `Shift+↑` / `Shift+↓` | Scroll the active read track up / down |
+| `Ctrl+↑` / `Ctrl+↓` | Select the previous / next active phase track |
+| `b` | Toggle fluorescent brackets around selected read bases |
 | `i` | Toggle expanded insertion sequence |
 | `m` | Toggle read methylation display |
 | `p` | Toggle separate HP1/HP2 read tracks |
@@ -104,7 +113,7 @@ To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capt
 | `r` | Refresh current region |
 | `s` | Save ANSI text and HTML screenshots to `screenshots/` |
 | `?` | Toggle help overlay |
-| `Esc` | Cancel input |
+| `Esc` | Clear selected position; cancel input or dismiss help |
 | `Enter` | Confirm input |
 
 ## UI Layout
@@ -121,7 +130,7 @@ To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capt
 │ >>>>>>>>>>>>>>>>>>>>>>>>>>                              │
 │ >>>>>>>>>>>>>>>>>>>X>>>>>>>>>>>>>>>>>>>>>>>>>           │
 └─────────────────────────────────────────────────────────┘
-│ q:quit  h/l:pan  H/L:big pan  +/-:zoom  g:goto  ?:help │  ← bottom bar
+│ q:quit  h/l:pan  Shift+←→:1kb  Shift+↑↓:scroll  ?:help │  ← bottom bar
 ```
 
 ## Read Rendering
@@ -138,30 +147,34 @@ CIGAR operations:
 - `~` — skip / intron (N)
 - `S` — soft clip
 
-In the demo screenshot, the `read_ins_meth` insertion is expanded as `[GGGG]`, while the `read_del` deletion is visible as `--`.
+In the demo screenshot, the selected `read_ins_meth` insertion is expanded as `[[GGGG]]`, while the `read_del` deletion is visible as `--`. Manual expansion is available at every zoom level that renders individual bases. Individual-base mode requires one base per terminal column or narrower so each visible cell maps to one reference coordinate.
 
 Methylation display:
 - Press `m` to show or hide modified-base calls parsed from SAM/BAM `MM` tags.
 - `ML` probabilities are used when present: high-confidence modified calls are highlighted more strongly, low-confidence calls use a dimmer treatment, and calls without `ML` are underlined.
 - Calls are rendered on aligned read bases after CIGAR mapping; soft-clipped or inserted bases are parsed but not drawn as reference-aligned methylation marks.
+- The selected-position summary reports `meth:n`, `unmod:n`, and `reads:n` for modified, unmodified, and total aligned query bases at that reference position. With phase tracks enabled, it groups all base, indel, and methylation tallies as `HP1[...] HP2[...] U[...]`, where `U` is unphased and each group uses compact `m1/u3/r4` counts.
 
 The demo BAM includes forward and reverse-strand MM/ML calls so the `m` toggle visibly changes the read pileup.
 
 Position selection:
-- Left-click anywhere in the genomic canvas to select its reference coordinate. The top bar shows `pos:contig:position` using a 1-based position.
-- Occupied read cells at that coordinate are reversed and underlined across all visible read tracks without replacing their base, indel, methylation, phase, or MAPQ styles.
-- When an insertion is expanded, clicking any gap cell selects the insertion anchor. Selections clear when navigating to a different view or contig.
+- Left-click anywhere in the genomic canvas to select its reference coordinate. The top bar shows `pos:contig:position` using a 1-based position and its MAPQ-filtered allele tally (`A`, `C`, `G`, `T`, `N`, deleted reference alleles such as `-ACT` from a FASTA, `MD` tag, or aligned-read consensus, and inserted sequences such as `+GGGG`). Substitutions are included in their observed base count.
+- Occupied read cells at that coordinate are reversed and underlined across all visible read tracks. When individual bases are visible, fluorescent-green brackets around occupied selected bases are enabled by default and can be toggled with `b`.
+- When an insertion is expanded, clicking any gap cell selects the preceding reference base, highlights that base and the inserted sequence, reports the insertion tally there, and displays the selected insertion with a fluorescent outer bracket pair (`[[sequence]]`). Enabling expansion with an insertion anchor selected, or moving an existing selection onto one, activates that insertion. Zooming keeps a selected base and centers the new view on it. Selections clear when coarse-panning, jumping, or changing contig.
 
 Phased-read display:
 - Press `p` to switch between the combined pileup and separate haplotype tracks parsed from integer `HP` and `PS` BAM tags. The separated display is off by default.
 - HP1 and HP2 reads are independently coordinate-packed into labeled cyan and magenta tracks against the same reference coordinates.
+- Every packed row is retained. Each phase section receives a compact, independently scrollable viewport, including capacity released when another section needs fewer rows.
+- Mouse-wheel scrolling uses the section under the pointer. `Shift+↑`/`Shift+↓` scroll the active section, and `Ctrl+↑`/`Ctrl+↓` chooses it for keyboard-only use. The active section has a reversed header.
+- Each phased track labels the visible `PS` blocks and marks their observed starts with a same-color rail; a boundary underlines an aligned base rather than replacing it.
 - Untagged reads, malformed tags, and haplotypes other than HP1/HP2 remain visible in a smaller neutral `Unphased` section.
 - Both dark and light themes use separate readable palettes.
 - MAPQ remains visible within each haplotype color: high-quality reads are bold, medium-quality reads use normal intensity, and reads below MAPQ 30 are dim.
 - Mismatch, insertion, deletion, and methylation styles override the phase background where they occur.
-- Coverage continues to include all reads that pass the MAPQ filter. `PS` values remain available in the render model for future phase-set-aware interactions.
+- Coverage continues to include all reads that pass the MAPQ filter. Reads without a valid `PS` tag remain visible but do not create a phase-set boundary.
 
-The demo BAM includes HP1, HP2, untagged, and malformed-tag reads so the fallback behavior is visible and testable.
+The demo BAM includes HP1 reads from two phase sets, HP2, untagged, and malformed-tag reads so the boundary and fallback behavior are visible and testable.
 
 Theme display:
 - Use `--light` to start with the light palette.

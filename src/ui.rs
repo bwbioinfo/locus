@@ -1,13 +1,16 @@
+use std::collections::BTreeMap;
+
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap},
 };
 
 use crate::render::{
-    ViewTransform,
+    BASE_RENDER_THRESHOLD, ViewTransform,
     coverage::CoverageTrack,
     features::FeaturesTrack,
     reads::{ReadsTrack, SelectedPositionOverlay},
@@ -15,13 +18,16 @@ use crate::render::{
     ruler::Ruler,
 };
 use crate::{
-    app::{App, Mode},
-    cache::{PhasePileupLayout, PileupRow},
+    app::{App, Mode, ReadTrack},
+    cache::{
+        CigarOp, PhasePileupLayout, PhasePositionAlleleTallies, PileupRow, PositionAlleleTally,
+        RenderRead, Strand,
+    },
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let [top_bar, main, bottom_bar] = browser_layout(area);
+    let [top_bar, main, bottom_bar] = app_browser_layout(app, area);
 
     draw_top_bar(frame, app, top_bar);
     draw_main(frame, app, main);
@@ -45,22 +51,85 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
-fn browser_layout(area: Rect) -> [Rect; 3] {
+fn app_browser_layout(app: &App, area: Rect) -> [Rect; 3] {
+    browser_layout_with_top_bar_height(area, top_bar_height(app))
+}
+
+fn browser_layout_with_top_bar_height(area: Rect, top_bar_height: u16) -> [Rect; 3] {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Min(5),
-            Constraint::Length(1),
+            Constraint::Length(top_bar_height),
+            Constraint::Min(MIN_BROWSER_HEIGHT),
+            Constraint::Length(BOTTOM_BAR_HEIGHT),
         ])
         .split(area);
 
     [chunks[0], chunks[1], chunks[2]]
 }
 
+const TOP_BAR_HEADER_HEIGHT: u16 = 1;
+const MIN_BROWSER_HEIGHT: u16 = 5;
+const BOTTOM_BAR_HEIGHT: u16 = 1;
+
+struct TopBarContent {
+    identity: String,
+    selected_info: Option<String>,
+    metrics: String,
+    status: Option<String>,
+    detail_lines: Vec<String>,
+}
+
+fn top_bar_height(app: &App) -> u16 {
+    TOP_BAR_HEADER_HEIGHT.saturating_add(
+        top_bar_content(app, app.terminal_cols as usize)
+            .detail_lines
+            .len() as u16,
+    )
+}
+
+fn max_detail_rows(app: &App) -> usize {
+    app.terminal_rows
+        .saturating_sub(TOP_BAR_HEADER_HEIGHT + MIN_BROWSER_HEIGHT + BOTTOM_BAR_HEIGHT) as usize
+}
+
+const RULER_HEIGHT: u16 = 2;
+const REFERENCE_HEIGHT: u16 = 1;
+const FEATURES_HEIGHT: u16 = 4;
+const MAX_COVERAGE_HEIGHT: u16 = 3;
+
+fn coverage_height(main_height: u16) -> u16 {
+    MAX_COVERAGE_HEIGHT.min(main_height / 5)
+}
+
+fn read_area_height(main_height: u16, has_reference: bool, has_features: bool) -> u16 {
+    let fixed_height = RULER_HEIGHT
+        .saturating_add(coverage_height(main_height))
+        .saturating_add(if has_reference { REFERENCE_HEIGHT } else { 0 })
+        .saturating_add(if has_features { FEATURES_HEIGHT } else { 0 });
+    main_height.saturating_sub(fixed_height)
+}
+
+#[cfg(test)]
+pub(crate) fn available_read_rows(
+    terminal_rows: u16,
+    has_reference: bool,
+    has_features: bool,
+) -> usize {
+    let [_, main, _] = browser_layout_with_top_bar_height(Rect::new(0, 0, 0, terminal_rows), 1);
+    read_area_height(main.height, has_reference, has_features) as usize
+}
+
+pub(crate) fn available_read_rows_for_app(app: &App) -> usize {
+    let [_, main, _] =
+        app_browser_layout(app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+    read_area_height(main.height, app.reference.is_some(), app.gff.is_some()) as usize
+}
+
 /// Return the genomic position under a terminal click in the main browser canvas.
 pub(crate) fn genomic_position_at(app: &App, column: u16, row: u16) -> Option<u64> {
-    let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+    let [_, main, _] =
+        app_browser_layout(app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
     if column < main.x
         || column >= main.x.saturating_add(main.width)
         || row < main.y
@@ -72,11 +141,180 @@ pub(crate) fn genomic_position_at(app: &App, column: u16, row: u16) -> Option<u6
     genomic_transform(app, main).col_to_bp(column.saturating_sub(main.x))
 }
 
+/// Return the read section under a terminal position for vertical navigation.
+pub(crate) fn read_track_at(app: &App, column: u16, row: u16) -> Option<ReadTrack> {
+    let [_, main, _] =
+        app_browser_layout(app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+    let reads_area = read_track_area(app, main);
+    if !rect_contains(reads_area, column, row) {
+        return None;
+    }
+
+    if !app.show_phasing {
+        return Some(ReadTrack::Combined);
+    }
+
+    let layout = app.cache.phase_layout.as_ref()?;
+    let [hp1, hp2, unphased] = phase_track_areas(reads_area, layout);
+    if rect_contains(hp1, column, row) {
+        Some(ReadTrack::Hp1)
+    } else if rect_contains(hp2, column, row) {
+        Some(ReadTrack::Hp2)
+    } else if rect_contains(unphased, column, row) {
+        Some(ReadTrack::Unphased)
+    } else {
+        None
+    }
+}
+
+/// Return the rendered read under a terminal position, if the position lands on an occupied row.
+pub(crate) fn read_index_at(app: &App, column: u16, row: u16) -> Option<usize> {
+    let [_, main, _] =
+        app_browser_layout(app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+    let reads_area = read_track_area(app, main);
+    if !rect_contains(reads_area, column, row) {
+        return None;
+    }
+    let position = genomic_transform(app, main).col_to_bp(column.saturating_sub(main.x))?;
+
+    if !app.show_phasing {
+        let row_idx = usize::from(row.saturating_sub(reads_area.y))
+            + app.read_track_scroll(ReadTrack::Combined);
+        return read_index_in_row(&app.cache.reads, &app.cache.pileup_rows, row_idx, position);
+    }
+
+    let layout = app.cache.phase_layout.as_ref()?;
+    let [hp1, hp2, unphased] = phase_track_areas(reads_area, layout);
+    read_index_in_phase_section(
+        app,
+        &app.cache.pileup_rows[layout.hp1_rows.clone()],
+        ReadTrack::Hp1,
+        hp1,
+        row,
+        position,
+    )
+    .or_else(|| {
+        read_index_in_phase_section(
+            app,
+            &app.cache.pileup_rows[layout.hp2_rows.clone()],
+            ReadTrack::Hp2,
+            hp2,
+            row,
+            position,
+        )
+    })
+    .or_else(|| {
+        layout.unphased_rows.as_ref().and_then(|rows| {
+            read_index_in_phase_section(
+                app,
+                &app.cache.pileup_rows[rows.clone()],
+                ReadTrack::Unphased,
+                unphased,
+                row,
+                position,
+            )
+        })
+    })
+}
+
+fn read_index_in_phase_section(
+    app: &App,
+    rows: &[PileupRow],
+    track: ReadTrack,
+    area: Rect,
+    row: u16,
+    position: u64,
+) -> Option<usize> {
+    let reads_start = area.y.saturating_add(1);
+    if row < reads_start || row >= area.y.saturating_add(area.height) {
+        return None;
+    }
+    let row_idx = usize::from(row.saturating_sub(reads_start)) + app.read_track_scroll(track);
+    read_index_in_row(&app.cache.reads, rows, row_idx, position)
+}
+
+fn read_index_in_row(
+    reads: &[RenderRead],
+    rows: &[PileupRow],
+    row_idx: usize,
+    position: u64,
+) -> Option<usize> {
+    rows.get(row_idx)?.iter().copied().find(|&read_idx| {
+        reads
+            .get(read_idx)
+            .is_some_and(|read| (read.start..read.end).contains(&position))
+    })
+}
+
+fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
+}
+
 fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let bp_per_col = app.view_span() as f64 / app.view_cols().max(1) as f64;
-    let read_count =
-        app.cache.pileup_rows.iter().map(Vec::len).sum::<usize>() + app.cache.hidden_reads;
     let width = area.width as usize;
+    let top_bar = top_bar_content(app, width);
+
+    let used = top_bar.identity.len()
+        + top_bar.selected_info.as_ref().map_or(0, String::len)
+        + top_bar.metrics.len()
+        + top_bar.status.as_ref().map_or(0, String::len);
+    let pad_len = width.saturating_sub(used);
+
+    let mut spans = vec![Span::styled(
+        top_bar.identity,
+        Style::default()
+            .fg(app.theme.top_bar_identity_fg())
+            .bg(app.theme.top_bar_identity_bg())
+            .add_modifier(Modifier::BOLD),
+    )];
+
+    if let Some(selected_info) = top_bar.selected_info {
+        spans.push(Span::styled(
+            selected_info,
+            Style::default()
+                .fg(app.theme.selected_info_fg())
+                .bg(app.theme.selected_info_bg())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    spans.push(Span::raw(" ".repeat(pad_len)));
+    spans.push(Span::styled(
+        top_bar.metrics,
+        Style::default().fg(app.theme.top_bar_fg()),
+    ));
+
+    if let Some(status) = top_bar.status {
+        spans.push(Span::styled(
+            status,
+            Style::default().fg(app.theme.status_fg()),
+        ));
+    }
+
+    let mut lines = vec![Line::from(spans)];
+    lines.extend(top_bar.detail_lines.into_iter().map(|detail| {
+        let padding = width.saturating_sub(detail.chars().count());
+        Line::from(Span::styled(
+            format!("{detail}{}", " ".repeat(padding)),
+            Style::default()
+                .fg(app.theme.selected_info_fg())
+                .bg(app.theme.selected_info_bg())
+                .add_modifier(Modifier::BOLD),
+        ))
+    }));
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.theme.top_bar_bg())),
+        area,
+    );
+}
+
+fn top_bar_content(app: &App, width: usize) -> TopBarContent {
+    let bp_per_col = app.view_span() as f64 / app.view_cols().max(1) as f64;
+    let read_count = app.cache.pileup_rows.iter().map(Vec::len).sum::<usize>();
     let file_name = app
         .source
         .path
@@ -91,51 +329,164 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         format_region_display(app),
     );
     let insertion_mode = insertion_mode_label(app.expand_insertions);
+    let selection_bracket_mode = selection_bracket_mode_label(app.show_selection_brackets);
     let methylation_mode = methylation_mode_label(app.show_methylation);
     let phasing_mode = phasing_mode_label(app.show_phasing);
     let theme_mode = theme_mode_label(app.theme);
     let mapq_filter = mapq_filter_label(app.min_mapq);
-    let selected_position = selected_position_label(app.current_contig(), app.selected_ref_pos)
-        .map(|position| format!(" pos:{position}"))
-        .unwrap_or_default();
+    let read_details = app
+        .selected_read()
+        .map(|read| selected_read_label(app.current_contig(), read));
+    let position_details = read_details
+        .is_none()
+        .then(|| selected_position_details(app))
+        .flatten();
     let metrics = format!(
-        "{selected_position}  reads:{}  {}  {}  scale:{:.1} bp/col  {}  {}  {} ",
-        read_count,
+        " {}  reads:{}  {}  scale:{:.1} bp/col  {}  {}  {}  {} ",
         mapq_filter,
+        read_count,
         phasing_mode,
         bp_per_col,
         insertion_mode,
+        selection_bracket_mode,
         methylation_mode,
         theme_mode
     );
     let status = app.status_msg.as_ref().map(|msg| format!(" status:{msg} "));
-    let (identity, metrics, status) = fit_top_bar(&identity, &metrics, status.as_deref(), width);
+    let inline_position_details = position_details.as_ref().is_some_and(|details| {
+        let (_, inline, _, _) =
+            fit_top_bar(&identity, Some(details), &metrics, status.as_deref(), width);
+        inline.as_deref() == Some(details.as_str())
+    });
+    let details = read_details.as_deref().or_else(|| {
+        (!inline_position_details)
+            .then_some(position_details.as_deref())
+            .flatten()
+    });
+    let (identity, selected_info, metrics, status) = fit_top_bar(
+        &identity,
+        inline_position_details
+            .then_some(position_details.as_deref())
+            .flatten(),
+        &metrics,
+        status.as_deref(),
+        width,
+    );
 
-    let used = identity.len() + metrics.len() + status.as_ref().map_or(0, |s| s.len());
-    let pad_len = width.saturating_sub(used);
+    TopBarContent {
+        identity,
+        selected_info,
+        metrics,
+        status,
+        detail_lines: details
+            .map(|details| bounded_detail_lines(details, width, max_detail_rows(app)))
+            .unwrap_or_default(),
+    }
+}
 
-    let mut spans = vec![
-        Span::styled(
-            identity,
-            Style::default()
-                .fg(app.theme.brand_fg())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" ".repeat(pad_len)),
-        Span::styled(metrics, Style::default().fg(app.theme.chrome_fg())),
-    ];
+fn selected_position_details(app: &App) -> Option<String> {
+    selected_position_label(app.current_contig(), app.selected_ref_pos).map(|position| {
+        let tally = if app.show_phasing {
+            app.selected_phase_allele_tallies
+                .as_ref()
+                .map(phase_allele_tallies_label)
+                .unwrap_or_else(|| {
+                    "HP1[none;m0/u0/r0] HP2[none;m0/u0/r0] U[none;m0/u0/r0]".to_string()
+                })
+        } else {
+            app.selected_allele_tally
+                .as_ref()
+                .map(selected_allele_tally_label)
+                .unwrap_or_else(|| "alleles:none meth:0 unmod:0 reads:0".to_string())
+        };
+        format!(" SEL {position}  {tally} ")
+    })
+}
 
-    if let Some(status) = status {
-        spans.push(Span::styled(
-            status,
-            Style::default().fg(app.theme.status_fg()),
-        ));
+fn selected_read_label(contig: &str, read: &RenderRead) -> String {
+    let strand = match read.strand {
+        Strand::Forward => '+',
+        Strand::Reverse => '-',
+    };
+    let phase = match (read.phase.haplotype, read.phase.phase_set) {
+        (Some(haplotype), Some(phase_set)) => format!("HP{haplotype}/PS:{phase_set}"),
+        (Some(haplotype), None) => format!("HP{haplotype}"),
+        (None, Some(phase_set)) => format!("PS:{phase_set}"),
+        (None, None) => "unphased".to_string(),
+    };
+    let mut flags = Vec::new();
+    if read.is_secondary {
+        flags.push("secondary");
+    }
+    if read.is_supplementary {
+        flags.push("supplementary");
+    }
+    if read.is_duplicate {
+        flags.push("duplicate");
+    }
+    let flags = if flags.is_empty() {
+        String::new()
+    } else {
+        format!(" flags:{}", flags.join(","))
+    };
+
+    format!(
+        "READ {}  {}:{}-{}  strand:{}  MAPQ:{}\nCIGAR:{}  phase:{}{}",
+        read.name,
+        contig,
+        read.start.saturating_add(1),
+        read.end,
+        strand,
+        read.mapq,
+        cigar_label(&read.cigar_ops),
+        phase,
+        flags,
+    )
+}
+
+fn bounded_detail_lines(details: &str, width: usize, max_rows: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
     }
 
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(app.theme.chrome_bg())),
-        area,
-    );
+    let mut lines = details
+        .lines()
+        .flat_map(|line| {
+            let characters = line.chars().collect::<Vec<_>>();
+            characters
+                .chunks(width)
+                .map(|chunk| chunk.iter().collect::<String>())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let truncated = lines.len() > max_rows;
+    lines.truncate(max_rows);
+    if truncated {
+        let Some(last) = lines.last_mut() else {
+            return lines;
+        };
+        *last = format!(
+            "{}~",
+            last.chars()
+                .take(width.saturating_sub(1))
+                .collect::<String>()
+        );
+    }
+    lines
+}
+
+fn cigar_label(cigar_ops: &[CigarOp]) -> String {
+    cigar_ops
+        .iter()
+        .map(|op| match op {
+            CigarOp::Match(length) => format!("{length}M"),
+            CigarOp::Mismatch(length) => format!("{length}X"),
+            CigarOp::Insertion(length) => format!("{length}I"),
+            CigarOp::Deletion(length) => format!("{length}D"),
+            CigarOp::Skip(length) => format!("{length}N"),
+            CigarOp::SoftClip(length) => format!("{length}S"),
+        })
+        .collect::<String>()
 }
 
 fn insertion_mode_label(expanded: bool) -> &'static str {
@@ -144,6 +495,10 @@ fn insertion_mode_label(expanded: bool) -> &'static str {
     } else {
         "ins:collapsed"
     }
+}
+
+fn selection_bracket_mode_label(shown: bool) -> &'static str {
+    if shown { "sel:brackets" } else { "sel:plain" }
 }
 
 fn methylation_mode_label(shown: bool) -> &'static str {
@@ -173,6 +528,95 @@ fn selected_position_label(contig: &str, selected_ref_pos: Option<u64>) -> Optio
     selected_ref_pos.map(|position| format!("{contig}:{}", position + 1))
 }
 
+fn selected_allele_tally_label(tally: &PositionAlleleTally) -> String {
+    let alleles = allele_tally_details_label(tally);
+    if alleles.is_empty() {
+        format!(
+            "alleles:none meth:{} unmod:{} reads:{}",
+            tally.methylated_read_count, tally.unmodified_read_count, tally.total_read_count
+        )
+    } else {
+        format!(
+            "alleles:{alleles} meth:{} unmod:{} reads:{}",
+            tally.methylated_read_count, tally.unmodified_read_count, tally.total_read_count
+        )
+    }
+}
+
+fn phase_allele_tallies_label(tallies: &PhasePositionAlleleTallies) -> String {
+    format!(
+        "HP1[{}] HP2[{}] U[{}]",
+        phase_allele_tally_label(&tallies.hp1),
+        phase_allele_tally_label(&tallies.hp2),
+        phase_allele_tally_label(&tallies.unphased),
+    )
+}
+
+fn phase_allele_tally_label(tally: &PositionAlleleTally) -> String {
+    let alleles = compact_allele_tally_details_label(tally);
+    if alleles.is_empty() {
+        format!(
+            "none;m{}/u{}/r{}",
+            tally.methylated_read_count, tally.unmodified_read_count, tally.total_read_count
+        )
+    } else {
+        format!(
+            "{alleles};m{}/u{}/r{}",
+            tally.methylated_read_count, tally.unmodified_read_count, tally.total_read_count
+        )
+    }
+}
+
+fn allele_tally_details_label(tally: &PositionAlleleTally) -> String {
+    let mut alleles = Vec::new();
+    for base in *b"ACGTN" {
+        if let Some(count) = tally.base_counts.get(&base) {
+            alleles.push(format!("{}:{count}", base as char));
+        }
+    }
+    for (&base, &count) in &tally.base_counts {
+        if !matches!(base, b'A' | b'C' | b'G' | b'T' | b'N') {
+            alleles.push(format!("{}:{count}", base as char));
+        }
+    }
+    for (sequence, count) in &tally.deletion_counts {
+        alleles.push(format!("-{}:{count}", String::from_utf8_lossy(sequence)));
+    }
+    if tally.deletion_count > 0 {
+        alleles.push(format!("DEL:{}", tally.deletion_count));
+    }
+    for (sequence, count) in &tally.insertion_counts {
+        alleles.push(format!("+{}:{count}", String::from_utf8_lossy(sequence)));
+    }
+
+    alleles.join(" ")
+}
+
+fn compact_allele_tally_details_label(tally: &PositionAlleleTally) -> String {
+    let mut alleles = Vec::new();
+    for base in *b"ACGTN" {
+        if let Some(count) = tally.base_counts.get(&base) {
+            alleles.push(format!("{}{}", base as char, count));
+        }
+    }
+    for (&base, &count) in &tally.base_counts {
+        if !matches!(base, b'A' | b'C' | b'G' | b'T' | b'N') {
+            alleles.push(format!("{}{}", base as char, count));
+        }
+    }
+    for (sequence, count) in &tally.deletion_counts {
+        alleles.push(format!("-{}{}", String::from_utf8_lossy(sequence), count));
+    }
+    if tally.deletion_count > 0 {
+        alleles.push(format!("DEL{}", tally.deletion_count));
+    }
+    for (sequence, count) in &tally.insertion_counts {
+        alleles.push(format!("+{}{}", String::from_utf8_lossy(sequence), count));
+    }
+
+    alleles.join(",")
+}
+
 fn truncate_to_width(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
         return text.to_string();
@@ -194,23 +638,45 @@ fn truncate_to_width(text: &str, width: usize) -> String {
 
 fn fit_top_bar(
     identity: &str,
+    selected_info: Option<&str>,
     metrics: &str,
     status: Option<&str>,
     width: usize,
-) -> (String, String, Option<String>) {
+) -> (String, Option<String>, String, Option<String>) {
     if width == 0 {
-        return (String::new(), String::new(), status.map(|_| String::new()));
+        return (
+            String::new(),
+            selected_info.map(|_| String::new()),
+            String::new(),
+            status.map(|_| String::new()),
+        );
     }
 
-    let identity_budget = if width < 40 { width / 2 } else { width * 2 / 5 };
+    let identity_budget = if selected_info.is_some() && width >= 40 {
+        width / 4
+    } else if width < 40 {
+        width / 2
+    } else {
+        width * 2 / 5
+    };
     let identity = truncate_to_width(identity, identity_budget.max(1).min(width));
     let remaining = width.saturating_sub(identity.len());
+
+    if let Some(selected_info) = selected_info {
+        let selected_info = truncate_to_width(selected_info, remaining);
+        let metrics = truncate_to_width(
+            metrics,
+            width.saturating_sub(identity.len() + selected_info.len()),
+        );
+        return (identity, Some(selected_info), metrics, None);
+    }
+
     let status_reserve = status.map_or(0, |text| (remaining / 4).min(text.len()));
     let metrics = truncate_to_width(metrics, remaining.saturating_sub(status_reserve));
     let status = status
         .map(|text| truncate_to_width(text, width.saturating_sub(identity.len() + metrics.len())));
 
-    (identity, metrics, status)
+    (identity, None, metrics, status)
 }
 
 fn format_region_display(app: &App) -> String {
@@ -219,29 +685,12 @@ fn format_region_display(app: &App) -> String {
 
 fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     let transform = genomic_transform(app, area);
-
-    let ruler_h = 2u16;
-    let reference_h: u16 = if app.reference.is_some() { 1 } else { 0 };
-    let features_h: u16 = if app.gff.is_some() { 4 } else { 0 };
-    let coverage_h = 3u16.min(area.height / 5);
-    let reads_h = area
-        .height
-        .saturating_sub(ruler_h + reference_h + features_h + coverage_h);
-
-    let mut constraints = vec![Constraint::Length(ruler_h)];
-    if reference_h > 0 {
-        constraints.push(Constraint::Length(reference_h));
-    }
-    if features_h > 0 {
-        constraints.push(Constraint::Length(features_h));
-    }
-    constraints.push(Constraint::Length(coverage_h));
-    constraints.push(Constraint::Min(reads_h));
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
+    let chunks = main_chunks(app, area);
+    let reference_h = if app.reference.is_some() {
+        REFERENCE_HEIGHT
+    } else {
+        0
+    };
 
     let mut chunk_idx = 0;
 
@@ -299,28 +748,64 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn main_chunks(app: &App, area: Rect) -> Vec<Rect> {
+    let mut constraints = vec![Constraint::Length(RULER_HEIGHT)];
+    if app.reference.is_some() {
+        constraints.push(Constraint::Length(REFERENCE_HEIGHT));
+    }
+    if app.gff.is_some() {
+        constraints.push(Constraint::Length(FEATURES_HEIGHT));
+    }
+    constraints.push(Constraint::Length(coverage_height(area.height)));
+    constraints.push(Constraint::Min(read_area_height(
+        area.height,
+        app.reference.is_some(),
+        app.gff.is_some(),
+    )));
+
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area)
+        .to_vec()
+}
+
+fn read_track_area(app: &App, area: Rect) -> Rect {
+    main_chunks(app, area).last().copied().unwrap_or_default()
+}
+
 fn genomic_transform(app: &App, area: Rect) -> ViewTransform {
     let base_transform =
         ViewTransform::new(app.view_start, app.view_end, area.width.saturating_sub(2));
-    base_transform.with_insertion_gap(app.selected_insertion_gap(&base_transform))
+    let insertion_gap = app.selected_insertion_gap(&base_transform);
+    let show_selection_brackets =
+        app.show_selection_brackets && base_transform.bp_per_col() <= BASE_RENDER_THRESHOLD;
+    let selected_insertion = show_selection_brackets
+        && app.selected_ref_pos.is_some_and(|selected_ref_pos| {
+            insertion_gap.is_some_and(|gap| gap.anchor_ref_pos() == selected_ref_pos)
+        });
+    let selection_bracket = if show_selection_brackets && !selected_insertion {
+        app.selected_ref_pos
+    } else {
+        None
+    };
+    base_transform
+        .with_insertion_gap(insertion_gap)
+        .with_selection_bracket(selection_bracket)
+        .with_double_insertion_brackets(selected_insertion)
 }
 
 fn draw_standard_pileup(frame: &mut Frame, app: &App, transform: ViewTransform, area: Rect) {
-    render_reads_track(frame, app, transform, &app.cache.pileup_rows, area);
-
-    if app.cache.hidden_reads > 0 {
-        let msg = format!(" +{} reads hidden ", app.cache.hidden_reads);
-        let notice_area = Rect {
-            x: area.x,
-            y: area.y + area.height.saturating_sub(1),
-            width: (msg.len() as u16).min(area.width),
-            height: 1,
-        };
-        frame.render_widget(
-            Paragraph::new(msg).style(Style::default().fg(app.theme.status_fg())),
-            notice_area,
-        );
-    }
+    let offset = app
+        .read_track_scroll(ReadTrack::Combined)
+        .min(app.cache.pileup_rows.len());
+    render_reads_track(
+        frame,
+        app,
+        transform,
+        &app.cache.pileup_rows[offset..],
+        area,
+    );
 }
 
 fn draw_phased_pileup(
@@ -330,17 +815,18 @@ fn draw_phased_pileup(
     area: Rect,
     layout: &PhasePileupLayout,
 ) {
-    let areas = phase_track_areas(area, layout.unphased_rows.is_some());
+    let areas = phase_track_areas(area, layout);
     draw_phase_section(
         frame,
         app,
         transform,
         PhaseSection {
             area: areas[0],
+            track: ReadTrack::Hp1,
             label: "HP1",
             color: app.theme.phase_hp1_fg(),
             rows: &app.cache.pileup_rows[layout.hp1_rows.clone()],
-            hidden_reads: layout.hp1_hidden,
+            show_phase_set_boundaries: true,
         },
     );
     draw_phase_section(
@@ -349,10 +835,11 @@ fn draw_phased_pileup(
         transform,
         PhaseSection {
             area: areas[1],
+            track: ReadTrack::Hp2,
             label: "HP2",
             color: app.theme.phase_hp2_fg(),
             rows: &app.cache.pileup_rows[layout.hp2_rows.clone()],
-            hidden_reads: layout.hp2_hidden,
+            show_phase_set_boundaries: true,
         },
     );
 
@@ -363,10 +850,11 @@ fn draw_phased_pileup(
             transform,
             PhaseSection {
                 area: areas[2],
+                track: ReadTrack::Unphased,
                 label: "Unphased",
                 color: app.theme.phase_unphased_fg(),
                 rows: &app.cache.pileup_rows[unphased_rows.clone()],
-                hidden_reads: layout.unphased_hidden,
+                show_phase_set_boundaries: false,
             },
         );
     }
@@ -374,10 +862,11 @@ fn draw_phased_pileup(
 
 struct PhaseSection<'a> {
     area: Rect,
+    track: ReadTrack,
     label: &'a str,
     color: Color,
     rows: &'a [PileupRow],
-    hidden_reads: usize,
+    show_phase_set_boundaries: bool,
 }
 
 fn draw_phase_section(
@@ -388,49 +877,177 @@ fn draw_phase_section(
 ) {
     let PhaseSection {
         area,
+        track,
         label,
         color,
         rows,
-        hidden_reads,
+        show_phase_set_boundaries,
     } = section;
 
     if area.height == 0 || area.width == 0 {
         return;
     }
 
-    let read_count = rows.iter().map(Vec::len).sum::<usize>() + hidden_reads;
-    let header = phase_section_header(label, read_count, hidden_reads, area.width as usize);
+    let phase_sets = if show_phase_set_boundaries {
+        phase_set_boundaries(&app.cache.reads, rows)
+    } else {
+        Vec::new()
+    };
+    let read_count = rows.iter().map(Vec::len).sum::<usize>();
+    let header = phase_section_header(label, read_count, &phase_sets, area.width as usize);
+    let mut header_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    if app.active_read_track == track {
+        header_style = header_style.add_modifier(Modifier::REVERSED);
+    }
     frame.render_widget(
-        Paragraph::new(header).style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Paragraph::new(header).style(header_style),
         Rect { height: 1, ..area },
     );
 
-    render_reads_track(
+    render_phase_set_header_labels(
         frame,
-        app,
         transform,
-        rows,
-        Rect {
-            y: area.y.saturating_add(1),
-            height: area.height.saturating_sub(1),
-            ..area
-        },
+        &phase_sets,
+        color,
+        area,
+        phase_section_prefix(label, read_count, &phase_sets)
+            .chars()
+            .count(),
     );
+
+    let reads_area = Rect {
+        y: area.y.saturating_add(1),
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let offset = app.read_track_scroll(track).min(rows.len());
+    render_reads_track(frame, app, transform, &rows[offset..], reads_area);
+    frame.render_widget(
+        PhaseSetBoundaryOverlay {
+            boundaries: &phase_sets,
+            transform,
+            color,
+        },
+        reads_area,
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PhaseSetBoundary {
+    id: u32,
+    start: u64,
+}
+
+fn phase_set_boundaries(reads: &[RenderRead], rows: &[PileupRow]) -> Vec<PhaseSetBoundary> {
+    let mut starts = BTreeMap::new();
+
+    for row in rows {
+        for &read_idx in row {
+            let Some(read) = reads.get(read_idx) else {
+                continue;
+            };
+            let Some(id) = read.phase.phase_set else {
+                continue;
+            };
+            starts
+                .entry(id)
+                .and_modify(|start: &mut u64| *start = (*start).min(read.start))
+                .or_insert(read.start);
+        }
+    }
+
+    let mut boundaries = starts
+        .into_iter()
+        .map(|(id, start)| PhaseSetBoundary { id, start })
+        .collect::<Vec<_>>();
+    boundaries.sort_by_key(|boundary| (boundary.start, boundary.id));
+    boundaries
+}
+
+struct PhaseSetBoundaryOverlay<'a> {
+    boundaries: &'a [PhaseSetBoundary],
+    transform: ViewTransform,
+    color: Color,
+}
+
+impl Widget for PhaseSetBoundaryOverlay<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        for boundary in self.boundaries {
+            let Some(col) = self.transform.bp_to_col(boundary.start) else {
+                continue;
+            };
+            let x = area.x.saturating_add(col);
+            if x >= area.x.saturating_add(area.width) {
+                continue;
+            }
+
+            for y in area.y..area.y.saturating_add(area.height) {
+                let Some(cell) = buf.cell_mut((x, y)) else {
+                    continue;
+                };
+                if cell.symbol().trim().is_empty() {
+                    cell.set_symbol("┊");
+                    cell.set_style(Style::default().fg(self.color).add_modifier(Modifier::DIM));
+                } else {
+                    cell.set_style(cell.style().add_modifier(Modifier::UNDERLINED));
+                }
+            }
+        }
+    }
+}
+
+fn render_phase_set_header_labels(
+    frame: &mut Frame,
+    transform: ViewTransform,
+    boundaries: &[PhaseSetBoundary],
+    color: Color,
+    area: Rect,
+    prefix_width: usize,
+) {
+    let mut previous_end = area.x.saturating_add(prefix_width as u16);
+    let area_end = area.x.saturating_add(area.width);
+
+    for boundary in boundaries {
+        let Some(col) = transform.bp_to_col(boundary.start) else {
+            continue;
+        };
+        let label = format!(" PS:{} ", boundary.id);
+        let label_width = label.chars().count() as u16;
+        let x = area.x.saturating_add(col);
+        if x < previous_end || x.saturating_add(label_width) > area_end {
+            continue;
+        }
+
+        frame.render_widget(
+            Paragraph::new(label).style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Rect {
+                x,
+                y: area.y,
+                width: label_width,
+                height: 1,
+            },
+        );
+        previous_end = x.saturating_add(label_width);
+    }
+}
+
+fn phase_section_prefix(label: &str, read_count: usize, phase_sets: &[PhaseSetBoundary]) -> String {
+    let noun = if read_count == 1 { "read" } else { "reads" };
+    let phase_sets = match phase_sets {
+        [] => String::new(),
+        [first] => format!("  PS:{}", first.id),
+        [first, remaining @ ..] => format!("  PS:{} +{}", first.id, remaining.len()),
+    };
+    format!(" {label}  {read_count} {noun}{phase_sets} ")
 }
 
 fn phase_section_header(
     label: &str,
     read_count: usize,
-    hidden_reads: usize,
+    phase_sets: &[PhaseSetBoundary],
     width: usize,
 ) -> String {
-    let noun = if read_count == 1 { "read" } else { "reads" };
-    let hidden = if hidden_reads > 0 {
-        format!("  +{hidden_reads} hidden")
-    } else {
-        String::new()
-    };
-    let prefix = format!(" {label}  {read_count} {noun}{hidden} ");
+    let prefix = phase_section_prefix(label, read_count, phase_sets);
     let divider = "─".repeat(width.saturating_sub(prefix.chars().count()));
     truncate_to_width(&format!("{prefix}{divider}"), width)
 }
@@ -450,6 +1067,7 @@ fn render_reads_track(
             transform,
             show_names: area.width > 80,
             expand_insertions: app.expand_insertions,
+            selected_ref_pos: app.selected_ref_pos,
             show_methylation: app.show_methylation,
             show_phasing: app.show_phasing,
             theme: app.theme,
@@ -460,20 +1078,21 @@ fn render_reads_track(
         SelectedPositionOverlay {
             selected_ref_pos: app.selected_ref_pos,
             transform,
+            theme: app.theme,
         },
         area,
     );
 }
 
-fn phase_track_areas(area: Rect, has_unphased: bool) -> [Rect; 3] {
-    let unphased_height = if has_unphased && area.height >= 4 {
-        (area.height / 5).max(2)
-    } else {
-        0
-    };
-    let phased_height = area.height.saturating_sub(unphased_height);
-    let hp1_height = phased_height.div_ceil(2);
-    let hp2_height = phased_height / 2;
+fn phase_track_areas(area: Rect, layout: &PhasePileupLayout) -> [Rect; 3] {
+    let mut remaining_height = area.height;
+    let hp1_height = phase_section_height(&mut remaining_height, layout.hp1_viewport_rows, true);
+    let hp2_height = phase_section_height(&mut remaining_height, layout.hp2_viewport_rows, true);
+    let unphased_height = phase_section_height(
+        &mut remaining_height,
+        layout.unphased_viewport_rows,
+        layout.unphased_rows.is_some(),
+    );
 
     let hp1 = Rect {
         height: hp1_height,
@@ -493,13 +1112,24 @@ fn phase_track_areas(area: Rect, has_unphased: bool) -> [Rect; 3] {
     [hp1, hp2, unphased]
 }
 
+fn phase_section_height(remaining_height: &mut u16, row_count: usize, present: bool) -> u16 {
+    if !present {
+        return 0;
+    }
+
+    let requested = u16::try_from(row_count.saturating_add(1)).unwrap_or(u16::MAX);
+    let height = requested.min(*remaining_height);
+    *remaining_height = remaining_height.saturating_sub(height);
+    height
+}
+
 fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
     let keys = match app.mode {
         Mode::Normal => {
             if app.gff.is_some() {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  Shift+←/→:1kb  Shift+↑/↓:scroll  Ctrl+↑/↓:track  +/-:zoom  i:insertions  b:brackets  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  Esc:clear  ?:help"
             } else {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  Shift+←/→:1kb  Shift+↑/↓:scroll  Ctrl+↑/↓:track  +/-:zoom  i:insertions  b:brackets  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  Esc:clear  ?:help"
             }
         }
         Mode::GoTo => " Enter:confirm  Esc:cancel",
@@ -680,13 +1310,19 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Line::from(""),
         Line::from("  q          Quit"),
-        Line::from("  h / ←      Pan left (small)"),
-        Line::from("  l / →      Pan right (small)"),
-        Line::from("  H          Pan left (large)"),
-        Line::from("  L          Pan right (large)"),
+        Line::from("  h / ←      Pan left (or move selected base left one bp)"),
+        Line::from("  l / →      Pan right (or move selected base right one bp)"),
+        Line::from("  Shift+←/→  Pan 1,000 bp left / right"),
+        Line::from("  H / L      Pan 1,000 bp left / right"),
         Line::from("  ↑ / + / =  Zoom in"),
         Line::from("  ↓ / -      Zoom out"),
+        Line::from("  Shift+↑/↓  Scroll active read track"),
+        Line::from("  Ctrl+↑/↓   Select previous / next phased read track"),
+        Line::from("  Mouse wheel Scroll read track under pointer"),
         Line::from("  Left click Select genomic position and highlight read bases"),
+        Line::from("  Shift+click Select read and show multi-line alignment details"),
+        Line::from("  Esc        Clear selected position"),
+        Line::from("  b          Toggle fluorescent selection brackets"),
         Line::from("  i          Toggle expanded insertion sequence"),
         Line::from("  m          Toggle read methylation"),
         Line::from("  p          Toggle separated HP1 / HP2 read tracks"),
@@ -716,6 +1352,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(
             "    Reference mismatches use base-colored bold backgrounds when --reference is loaded",
         ),
+        Line::from("    The reversed phase-track header is the active keyboard target"),
         Line::from(""),
         Line::from("  CIGAR:  > / <  match   base highlight  mismatch   I  ins   -  del   ~  skip"),
         Line::from(""),
@@ -748,8 +1385,38 @@ fn centered_rect(pct_x: u16, pct_y: u16, r: Rect) -> Rect {
 mod tests {
     use std::path::Path;
 
+    use ratatui::{Terminal, backend::TestBackend};
+
     use super::*;
-    use crate::{bam::BamSource, region::Region, theme::Theme};
+    use crate::{
+        bam::BamSource,
+        cache::{CigarOp, ReadPhase, Strand},
+        gff::GffStore,
+        reference::ReferenceStore,
+        region::Region,
+        theme::Theme,
+    };
+
+    fn phase_read(name: &str, start: u64, phase_set: Option<u32>) -> RenderRead {
+        RenderRead {
+            name: name.to_string(),
+            start,
+            end: start + 10,
+            strand: Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![CigarOp::Match(10)],
+            sequence: b"AAAAAAAAAA".to_vec(),
+            methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
+            phase: ReadPhase {
+                haplotype: Some(1),
+                phase_set,
+            },
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        }
+    }
 
     #[test]
     fn truncate_to_width_respects_small_widths() {
@@ -766,13 +1433,53 @@ mod tests {
         let metrics = " reads:3  mapq>=30  phase:tracks  scale:2.0 bp/col  ins:collapsed  meth:off  theme:dark ";
         let status = " status:minimum MAPQ set to 30 ";
 
-        let (identity, metrics, status) = fit_top_bar(identity, metrics, Some(status), 80);
+        let (identity, selected_info, metrics, status) =
+            fit_top_bar(identity, None, metrics, Some(status), 80);
         let status = status.expect("status remains present");
 
         assert!(identity.starts_with(" LOCUS"));
+        assert!(selected_info.is_none());
         assert!(metrics.contains("mapq>=30"));
         assert!(metrics.contains("phase:tracks"));
         assert!(identity.len() + metrics.len() + status.len() <= 80);
+    }
+
+    #[test]
+    fn top_bar_prioritizes_selected_information_and_mapq() {
+        let identity = " LOCUS  file:demo.sorted.bam  region:chrDemo:45-115 ";
+        let selected_info = " SEL chrDemo:60  alleles:C:2 T:2 +GGGG:1 ";
+        let metrics = " mapq:all  reads:7  phase:tracks  scale:0.7 bp/col ";
+
+        let (identity, selected_info, metrics, status) = fit_top_bar(
+            identity,
+            Some(selected_info),
+            metrics,
+            Some(" status:ignored "),
+            110,
+        );
+        let selected_info = selected_info.expect("selection remains visible");
+
+        assert!(identity.starts_with(" LOCUS"));
+        assert!(selected_info.contains("SEL chrDemo:60"));
+        assert!(selected_info.contains("+GGGG:1"));
+        assert!(metrics.contains("mapq:all"));
+        assert!(status.is_none());
+        assert!(identity.len() + selected_info.len() + metrics.len() <= 110);
+    }
+
+    #[test]
+    fn top_bar_keeps_all_phase_count_groups_at_demo_width() {
+        let identity = " LOCUS  file:demo.sorted.bam  region:chrDemo:45-115 ";
+        let selected_info = " SEL chrDemo:60  HP1[m2/u1/r3] HP2[m0/u0/r0] U[m1/u3/r4] ";
+        let metrics = " mapq:all  reads:7  phase:tracks  scale:0.7 bp/col ";
+
+        let (_, selected_info, _, _) =
+            fit_top_bar(identity, Some(selected_info), metrics, None, 110);
+        let selected_info = selected_info.expect("selection remains visible");
+
+        assert!(selected_info.contains("HP1[m2/u1/r3]"));
+        assert!(selected_info.contains("HP2[m0/u0/r0]"));
+        assert!(selected_info.contains("U[m1/u3/r4]"));
     }
 
     #[test]
@@ -788,20 +1495,36 @@ mod tests {
     }
 
     #[test]
-    fn phase_track_areas_are_contiguous_and_bounded() {
+    fn phase_track_areas_are_compact_and_contiguous() {
         let area = Rect::new(7, 11, 80, 15);
-        let [hp1, hp2, unphased] = phase_track_areas(area, true);
+        let layout = PhasePileupLayout {
+            hp1_rows: 0..1,
+            hp2_rows: 1..2,
+            unphased_rows: Some(2..3),
+            hp1_viewport_rows: 1,
+            hp2_viewport_rows: 1,
+            unphased_viewport_rows: 1,
+        };
+        let [hp1, hp2, unphased] = phase_track_areas(area, &layout);
 
-        assert_eq!(hp1, Rect::new(7, 11, 80, 6));
-        assert_eq!(hp2, Rect::new(7, 17, 80, 6));
-        assert_eq!(unphased, Rect::new(7, 23, 80, 3));
-        assert_eq!(unphased.y + unphased.height, area.y + area.height);
+        assert_eq!(hp1, Rect::new(7, 11, 80, 2));
+        assert_eq!(hp2, Rect::new(7, 13, 80, 2));
+        assert_eq!(unphased, Rect::new(7, 15, 80, 2));
+        assert_eq!(unphased.y, hp2.y + hp2.height);
+        assert!(unphased.y + unphased.height < area.y + area.height);
     }
 
     #[test]
-    fn phase_track_areas_split_only_haplotypes_without_unphased_reads() {
+    fn phase_track_areas_fit_dense_rows_and_omit_unphased_section() {
         let area = Rect::new(2, 3, 40, 7);
-        let [hp1, hp2, unphased] = phase_track_areas(area, false);
+        let layout = PhasePileupLayout {
+            hp1_rows: 0..3,
+            hp2_rows: 3..5,
+            hp1_viewport_rows: 3,
+            hp2_viewport_rows: 2,
+            ..PhasePileupLayout::default()
+        };
+        let [hp1, hp2, unphased] = phase_track_areas(area, &layout);
 
         assert_eq!(hp1, Rect::new(2, 3, 40, 4));
         assert_eq!(hp2, Rect::new(2, 7, 40, 3));
@@ -809,18 +1532,233 @@ mod tests {
     }
 
     #[test]
-    fn phase_section_header_reports_group_and_hidden_reads() {
-        let header = phase_section_header("HP1", 4, 2, 30);
+    fn read_track_hit_testing_uses_the_phased_section_under_the_pointer() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 80;
+        app.terminal_rows = 24;
+        app.show_phasing = true;
+        app.cache.phase_layout = Some(PhasePileupLayout {
+            hp1_rows: 0..3,
+            hp2_rows: 3..6,
+            unphased_rows: Some(6..8),
+            hp1_viewport_rows: 2,
+            hp2_viewport_rows: 2,
+            unphased_viewport_rows: 1,
+        });
 
-        assert!(header.starts_with(" HP1  4 reads  +2 hidden "));
-        assert_eq!(header.chars().count(), 30);
-        assert!(phase_section_header("HP2", 1, 0, 20).starts_with(" HP2  1 read "));
+        let [_, main, _] =
+            app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let reads_area = read_track_area(&app, main);
+        let [hp1, hp2, unphased] = phase_track_areas(
+            reads_area,
+            app.cache.phase_layout.as_ref().expect("phase layout"),
+        );
+
+        assert_eq!(read_track_at(&app, hp1.x, hp1.y), Some(ReadTrack::Hp1));
+        assert_eq!(read_track_at(&app, hp2.x, hp2.y), Some(ReadTrack::Hp2));
+        assert_eq!(
+            read_track_at(&app, unphased.x, unphased.y),
+            Some(ReadTrack::Unphased)
+        );
+        assert_eq!(read_track_at(&app, 20, 1), None);
+    }
+
+    #[test]
+    fn read_selection_hit_testing_uses_the_visible_pileup_row() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 80;
+        app.terminal_rows = 24;
+        let position = app.view_start;
+        let hp1_read = phase_read("hp1", position, Some(50));
+        let mut hp2_read = phase_read("hp2", position, Some(50));
+        hp2_read.phase.haplotype = Some(2);
+        app.cache.reads = vec![hp1_read, hp2_read];
+        app.cache.pileup_rows = vec![vec![0], vec![1]];
+
+        let [_, main, _] =
+            app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let reads_area = read_track_area(&app, main);
+        let column = main.x.saturating_add(
+            genomic_transform(&app, main)
+                .bp_to_col(position)
+                .expect("visible position"),
+        );
+        assert_eq!(read_index_at(&app, column, reads_area.y), Some(0));
+
+        app.show_phasing = true;
+        app.cache.phase_layout = Some(PhasePileupLayout {
+            hp1_rows: 0..1,
+            hp2_rows: 1..2,
+            hp1_viewport_rows: 1,
+            hp2_viewport_rows: 1,
+            ..PhasePileupLayout::default()
+        });
+        let [hp1, hp2, _] = phase_track_areas(
+            reads_area,
+            app.cache.phase_layout.as_ref().expect("phase layout"),
+        );
+
+        assert_eq!(read_index_at(&app, column, hp1.y), None);
+        assert_eq!(read_index_at(&app, column, hp1.y + 1), Some(0));
+        assert_eq!(read_index_at(&app, column, hp2.y + 1), Some(1));
+    }
+
+    #[test]
+    fn phase_section_height_reserves_a_header_for_empty_rows() {
+        let mut remaining_height = 2;
+
+        assert_eq!(phase_section_height(&mut remaining_height, 0, true), 1);
+        assert_eq!(remaining_height, 1);
+        assert_eq!(phase_section_height(&mut remaining_height, 0, false), 0);
+    }
+
+    #[test]
+    fn phase_set_boundaries_are_sorted_deduplicated_and_ignore_missing_tags() {
+        let reads = vec![
+            phase_read("ps-100", 80, Some(100)),
+            phase_read("ps-50", 50, Some(50)),
+            phase_read("ps-100-earlier", 70, Some(100)),
+            phase_read("untagged", 90, None),
+        ];
+
+        assert_eq!(
+            phase_set_boundaries(&reads, &[vec![0, 1], vec![2, 3]]),
+            vec![
+                PhaseSetBoundary { id: 50, start: 50 },
+                PhaseSetBoundary { id: 100, start: 70 },
+            ]
+        );
+    }
+
+    #[test]
+    fn phase_set_boundary_overlay_marks_empty_cells_without_replacing_bases() {
+        let area = Rect::new(0, 0, 4, 2);
+        let transform = ViewTransform::new(100, 104, 4);
+        let mut buffer = Buffer::empty(area);
+        buffer[(1, 0)]
+            .set_char('A')
+            .set_style(Style::default().fg(Color::Green));
+
+        PhaseSetBoundaryOverlay {
+            boundaries: &[PhaseSetBoundary {
+                id: 101,
+                start: 101,
+            }],
+            transform,
+            color: Color::Cyan,
+        }
+        .render(area, &mut buffer);
+
+        assert_eq!(buffer[(1, 0)].symbol(), "A");
+        assert_eq!(buffer[(1, 0)].style().fg, Some(Color::Green));
+        assert!(
+            buffer[(1, 0)]
+                .style()
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
+        );
+        assert_eq!(buffer[(1, 1)].symbol(), "┊");
+        assert_eq!(buffer[(1, 1)].style().fg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn rendered_phase_sections_follow_their_packed_rows() {
+        let demo_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo");
+        let source = BamSource::open(demo_dir.join("demo.sorted.bam")).expect("open demo BAM");
+        let gff = GffStore::load(demo_dir.join("demo.sorted.gff.gz")).expect("open demo GFF");
+        let reference = ReferenceStore::load(demo_dir.join("demo.fa")).expect("open demo FASTA");
+        let mut app = App::new(
+            source,
+            Some(gff),
+            Some(reference),
+            Some(Region::new("chrDemo", 44, 115)),
+            Theme::Dark,
+            0,
+        )
+        .expect("create app");
+        app.terminal_cols = 110;
+        app.terminal_rows = 20;
+        app.refresh().expect("load demo reads");
+        app.toggle_phasing();
+
+        let layout = app.cache.phase_layout.as_ref().expect("phased layout");
+        assert_eq!(layout.hp1_rows.len(), 3);
+        assert_eq!(layout.hp2_rows.len(), 1);
+        assert_eq!(
+            layout.unphased_rows.as_ref().map_or(0, |rows| rows.len()),
+            1
+        );
+
+        let backend = TestBackend::new(app.terminal_cols, app.terminal_rows);
+        let mut terminal = Terminal::new(backend).expect("test backend is infallible");
+        terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+
+        let lines = (0..app.terminal_rows)
+            .map(|row| {
+                (0..app.terminal_cols)
+                    .filter_map(|col| terminal.backend().buffer().cell((col, row)))
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let hp1 = lines
+            .iter()
+            .position(|line| line.contains("HP1  4 reads  PS:50 +1"))
+            .expect("HP1 header");
+        let hp2 = lines
+            .iter()
+            .position(|line| line.contains("HP2  1 read"))
+            .expect("HP2 header");
+        let unphased = lines
+            .iter()
+            .position(|line| line.contains("Unphased  2 reads"))
+            .expect("unphased header");
+
+        assert_eq!(hp2, hp1 + 4);
+        assert_eq!(unphased, hp2 + 2);
+        assert!(lines[hp1].contains("PS:100"));
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((1, hp1 as u16))
+                .expect("active header cell")
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn phase_section_header_reports_group_and_phase_sets() {
+        let phase_sets = [
+            PhaseSetBoundary { id: 50, start: 50 },
+            PhaseSetBoundary {
+                id: 100,
+                start: 100,
+            },
+        ];
+        let header = phase_section_header("HP1", 4, &phase_sets, 40);
+
+        assert!(header.starts_with(" HP1  4 reads  PS:50 +1 "));
+        assert_eq!(header.chars().count(), 40);
+        assert!(phase_section_header("HP2", 1, &[], 20).starts_with(" HP2  1 read "));
     }
 
     #[test]
     fn insertion_mode_label_reflects_toggle_state() {
         assert_eq!(insertion_mode_label(false), "ins:collapsed");
         assert_eq!(insertion_mode_label(true), "ins:expanded");
+    }
+
+    #[test]
+    fn selection_bracket_mode_label_reflects_toggle_state() {
+        assert_eq!(selection_bracket_mode_label(true), "sel:brackets");
+        assert_eq!(selection_bracket_mode_label(false), "sel:plain");
     }
 
     #[test]
@@ -845,12 +1783,198 @@ mod tests {
     }
 
     #[test]
+    fn selected_read_label_reports_alignment_metadata() {
+        let mut read = phase_read("read-1", 100, Some(50));
+        read.strand = Strand::Reverse;
+        read.mapq = 42;
+        read.cigar_ops = vec![
+            CigarOp::Match(4),
+            CigarOp::Insertion(2),
+            CigarOp::Deletion(1),
+        ];
+        read.is_secondary = true;
+        read.is_duplicate = true;
+
+        assert_eq!(
+            selected_read_label("chrDemo", &read),
+            "READ read-1  chrDemo:101-110  strand:-  MAPQ:42\nCIGAR:4M2I1D  phase:HP1/PS:50 flags:secondary,duplicate"
+        );
+    }
+
+    #[test]
+    fn bounded_detail_lines_wrap_without_a_fixed_two_row_limit() {
+        assert_eq!(
+            bounded_detail_lines("READ read-1\nCIGAR:10M  phase:HP1", 40, 10),
+            vec!["READ read-1", "CIGAR:10M  phase:HP1"]
+        );
+        assert_eq!(
+            bounded_detail_lines("123456789\nCIGAR:10M", 8, 10),
+            vec!["12345678", "9", "CIGAR:10", "M"]
+        );
+        assert_eq!(
+            bounded_detail_lines("123456789\nCIGAR:10M", 8, 3),
+            vec!["12345678", "9", "CIGAR:1~"]
+        );
+    }
+
+    #[test]
+    fn long_selected_base_tally_uses_wrapped_detail_rows_only_when_needed() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 110;
+        app.terminal_rows = 24;
+        app.selected_ref_pos = Some(app.view_start);
+        app.selected_allele_tally = Some(PositionAlleleTally::default());
+
+        let short_selection = top_bar_content(&app, app.terminal_cols as usize);
+        assert!(short_selection.selected_info.is_some());
+        assert!(short_selection.detail_lines.is_empty());
+        assert_eq!(top_bar_height(&app), 1);
+
+        app.terminal_cols = 40;
+        app.selected_allele_tally = Some(PositionAlleleTally {
+            deletion_counts: BTreeMap::from([(b"ATCG".repeat(24), 1)]),
+            ..PositionAlleleTally::default()
+        });
+
+        let long_selection = top_bar_content(&app, app.terminal_cols as usize);
+        assert!(long_selection.selected_info.is_none());
+        assert!(long_selection.detail_lines.len() > 2);
+        assert!(long_selection.detail_lines.concat().contains("-ATCG"));
+        assert_eq!(
+            top_bar_height(&app) as usize,
+            TOP_BAR_HEADER_HEIGHT as usize + long_selection.detail_lines.len()
+        );
+    }
+
+    #[test]
+    fn long_selected_read_cigar_expands_beyond_two_detail_rows() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 30;
+        app.terminal_rows = 24;
+        let mut read = phase_read("long-cigar", 100, Some(50));
+        read.cigar_ops = vec![CigarOp::Match(1); 80];
+        app.cache.reads = vec![read];
+
+        app.select_read(0);
+
+        let details = top_bar_content(&app, app.terminal_cols as usize);
+        assert!(details.detail_lines.len() > 2);
+        assert!(details.detail_lines.concat().contains("CIGAR:1M1M"));
+        assert_eq!(
+            top_bar_height(&app) as usize,
+            TOP_BAR_HEADER_HEIGHT as usize + details.detail_lines.len()
+        );
+    }
+
+    #[test]
+    fn selected_read_uses_multiline_top_bar_and_adjusts_read_capacity() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 80;
+        app.terminal_rows = 24;
+        app.cache.reads = vec![phase_read("read-1", 100, Some(50))];
+
+        assert_eq!(top_bar_height(&app), 1);
+        assert_eq!(available_read_rows_for_app(&app), 17);
+
+        app.select_read(0);
+
+        let [top, main, bottom] =
+            app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        assert_eq!(top, Rect::new(0, 0, 80, 3));
+        assert_eq!(main, Rect::new(0, 3, 80, 20));
+        assert_eq!(bottom, Rect::new(0, 23, 80, 1));
+        assert_eq!(available_read_rows_for_app(&app), 15);
+
+        let backend = TestBackend::new(app.terminal_cols, app.terminal_rows);
+        let mut terminal = Terminal::new(backend).expect("test backend is infallible");
+        terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+        let details = (1..3)
+            .map(|row| {
+                (0..app.terminal_cols)
+                    .filter_map(|column| terminal.backend().buffer().cell((column, row)))
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(details[0].contains("READ read-1"));
+        assert!(details[1].contains("CIGAR:10M"));
+
+        app.clear_selected_read();
+        assert_eq!(top_bar_height(&app), 1);
+        assert_eq!(available_read_rows_for_app(&app), 17);
+    }
+
+    #[test]
+    fn selected_allele_tally_label_lists_bases_and_indels() {
+        let tally = PositionAlleleTally {
+            base_counts: BTreeMap::from([(b'A', 3), (b'C', 1)]),
+            deletion_counts: BTreeMap::from([(b"ACT".to_vec(), 2)]),
+            deletion_count: 1,
+            insertion_counts: BTreeMap::from([(b"GG".to_vec(), 1)]),
+            methylated_read_count: 2,
+            unmodified_read_count: 3,
+            total_read_count: 5,
+        };
+
+        assert_eq!(
+            selected_allele_tally_label(&tally),
+            "alleles:A:3 C:1 -ACT:2 DEL:1 +GG:1 meth:2 unmod:3 reads:5"
+        );
+        assert_eq!(
+            selected_allele_tally_label(&PositionAlleleTally::default()),
+            "alleles:none meth:0 unmod:0 reads:0"
+        );
+    }
+
+    #[test]
+    fn phase_allele_tallies_label_groups_all_selected_position_counts() {
+        let tallies = PhasePositionAlleleTallies {
+            hp1: PositionAlleleTally {
+                base_counts: BTreeMap::from([(b'A', 3)]),
+                methylated_read_count: 2,
+                unmodified_read_count: 1,
+                total_read_count: 3,
+                ..PositionAlleleTally::default()
+            },
+            hp2: PositionAlleleTally {
+                deletion_counts: BTreeMap::from([(b"G".to_vec(), 1)]),
+                ..PositionAlleleTally::default()
+            },
+            unphased: PositionAlleleTally {
+                insertion_counts: BTreeMap::from([(b"GG".to_vec(), 1)]),
+                methylated_read_count: 1,
+                unmodified_read_count: 3,
+                total_read_count: 4,
+                ..PositionAlleleTally::default()
+            },
+        };
+
+        assert_eq!(
+            phase_allele_tallies_label(&tallies),
+            "HP1[A3;m2/u1/r3] HP2[-G1;m0/u0/r0] U[+GG1;m1/u3/r4]"
+        );
+    }
+
+    #[test]
     fn browser_layout_reserves_the_top_and_bottom_bars() {
-        let [top, main, bottom] = browser_layout(Rect::new(0, 0, 80, 24));
+        let [top, main, bottom] = browser_layout_with_top_bar_height(Rect::new(0, 0, 80, 24), 1);
 
         assert_eq!(top, Rect::new(0, 0, 80, 1));
         assert_eq!(main, Rect::new(0, 1, 80, 22));
         assert_eq!(bottom, Rect::new(0, 23, 80, 1));
+    }
+
+    #[test]
+    fn available_read_rows_matches_the_drawn_optional_tracks() {
+        assert_eq!(available_read_rows(20, true, true), 8);
+        assert_eq!(available_read_rows(20, false, false), 13);
     }
 
     #[test]
@@ -866,10 +1990,15 @@ mod tests {
         app.expand_insertions = true;
         app.cycle_insertion_expansion(true);
         let anchor = app.selected_insertion_ref_pos.expect("selected insertion");
-        let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let [_, main, _] =
+            app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
         let transform = genomic_transform(&app, main);
+        let gap = app
+            .selected_insertion_gap(&transform)
+            .expect("visible insertion gap");
+        assert_eq!(anchor, gap.anchor_ref_pos());
         let (left_border, right_border) = transform
-            .insertion_border_cols(anchor)
+            .insertion_border_cols(gap.ref_pos)
             .expect("visible insertion gap");
 
         assert_eq!(
@@ -880,5 +2009,98 @@ mod tests {
             genomic_position_at(&app, main.x + right_border, main.y),
             Some(anchor)
         );
+    }
+
+    #[test]
+    fn selected_expanded_insertions_use_double_brackets_when_enabled() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 110;
+        app.terminal_rows = 20;
+        app.jump_to_region(&Region::new("chrDemo", 44, 115))
+            .expect("set demo region");
+        app.refresh().expect("load demo reads");
+        app.expand_insertions = true;
+        app.cycle_insertion_expansion(true);
+        let [_, main, _] =
+            app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let base_transform =
+            ViewTransform::new(app.view_start, app.view_end, main.width.saturating_sub(2));
+        let gap = app
+            .selected_insertion_gap(&base_transform)
+            .expect("visible insertion gap");
+
+        app.select_reference_position(gap.anchor_ref_pos());
+        let selected_transform = genomic_transform(&app, main);
+        assert_eq!(selected_transform.insertion_bracket_count(), 2);
+        assert_eq!(selected_transform.selection_bracket, None);
+
+        app.toggle_selection_brackets();
+        let unbracketed_transform = genomic_transform(&app, main);
+        assert_eq!(unbracketed_transform.insertion_bracket_count(), 1);
+    }
+
+    #[test]
+    fn selection_brackets_follow_the_base_render_threshold() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.view_start = 0;
+        app.selected_ref_pos = Some(2);
+
+        app.view_end = 5;
+        let base_visible = genomic_transform(&app, Rect::new(0, 0, 7, 1));
+        assert_eq!(base_visible.bp_per_col(), BASE_RENDER_THRESHOLD);
+        assert_eq!(base_visible.selection_bracket, Some(2));
+
+        app.view_end = 6;
+        let too_wide = genomic_transform(&app, Rect::new(0, 0, 7, 1));
+        assert_eq!(too_wide.selection_bracket, None);
+
+        app.view_end = 5;
+        app.toggle_selection_brackets();
+        let disabled = genomic_transform(&app, Rect::new(0, 0, 7, 1));
+        assert_eq!(disabled.selection_bracket, None);
+    }
+
+    #[test]
+    fn clicked_deletion_columns_select_the_deleted_reference_bases() {
+        let demo_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo");
+        let source = BamSource::open(demo_dir.join("demo.sorted.bam")).expect("open demo BAM");
+        let reference = ReferenceStore::load(demo_dir.join("demo.fa")).expect("open demo FASTA");
+        let mut app = App::new(
+            source,
+            None,
+            Some(reference),
+            Some(Region::new("chrDemo", 61, 65)),
+            Theme::Dark,
+            0,
+        )
+        .expect("create app");
+        app.terminal_cols = 6;
+        app.terminal_rows = 20;
+        app.show_selection_brackets = false;
+        app.refresh().expect("load demo reads");
+
+        for deleted_position in 62..64 {
+            let [_, main, _] =
+                app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+            let transform = genomic_transform(&app, main);
+            let column = transform
+                .bp_to_col(deleted_position)
+                .expect("deletion column");
+            let selected_position = genomic_position_at(&app, main.x + column, main.y)
+                .expect("clickable deletion column");
+            assert_eq!(selected_position, deleted_position);
+
+            app.select_reference_position(selected_position);
+            assert_eq!(
+                app.selected_allele_tally
+                    .as_ref()
+                    .and_then(|tally| tally.deletion_counts.get(b"GT" as &[u8])),
+                Some(&1)
+            );
+        }
     }
 }

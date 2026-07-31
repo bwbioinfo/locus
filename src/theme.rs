@@ -36,6 +36,58 @@ impl Theme {
         }
     }
 
+    /// Background for the persistent top information bar.
+    pub fn top_bar_bg(self) -> Color {
+        match self {
+            Self::Dark => Color::Black,
+            Self::Light => Color::Rgb(238, 242, 246),
+        }
+    }
+
+    pub fn top_bar_fg(self) -> Color {
+        match self {
+            Self::Dark => Color::White,
+            Self::Light => Color::Rgb(17, 24, 39),
+        }
+    }
+
+    pub fn top_bar_identity_bg(self) -> Color {
+        match self {
+            Self::Dark => Color::Rgb(0, 68, 82),
+            Self::Light => Color::Rgb(220, 234, 246),
+        }
+    }
+
+    pub fn top_bar_identity_fg(self) -> Color {
+        match self {
+            Self::Dark => Color::White,
+            Self::Light => Color::Rgb(0, 54, 94),
+        }
+    }
+
+    /// High-contrast pane for a clicked genomic position and its allele tally.
+    pub fn selected_info_bg(self) -> Color {
+        match self {
+            Self::Dark => Color::Cyan,
+            Self::Light => Color::Rgb(0, 76, 140),
+        }
+    }
+
+    pub fn selected_info_fg(self) -> Color {
+        match self {
+            Self::Dark => Color::Black,
+            Self::Light => Color::White,
+        }
+    }
+
+    /// High-visibility bracket color for selected bases and expanded insertions.
+    pub fn selection_bracket_fg(self) -> Color {
+        match self {
+            Self::Dark => Color::Rgb(57, 255, 20),
+            Self::Light => Color::Rgb(0, 150, 58),
+        }
+    }
+
     pub fn brand_fg(self) -> Color {
         match self {
             Self::Dark => Color::Cyan,
@@ -231,6 +283,20 @@ impl Theme {
         match self {
             Self::Dark => "#ddd",
             Self::Light => "#111111",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn top_bar_palettes_keep_selected_information_distinct() {
+        for theme in [Theme::Dark, Theme::Light] {
+            assert_ne!(theme.top_bar_bg(), theme.selected_info_bg());
+            assert_ne!(theme.selected_info_bg(), theme.selected_info_fg());
+            assert_ne!(theme.top_bar_identity_bg(), theme.top_bar_identity_fg());
         }
     }
 }

@@ -7,9 +7,7 @@ use ratatui::{
 
 use crate::{reference::ReferenceSlice, theme::Theme};
 
-use super::ViewTransform;
-
-const BASE_RENDER_THRESHOLD: f64 = 5.0;
+use super::{BASE_RENDER_THRESHOLD, ViewTransform};
 
 pub struct ReferenceTrack<'a> {
     pub reference: Option<&'a ReferenceSlice>,

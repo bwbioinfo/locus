@@ -28,7 +28,8 @@ capture_demo() {
     sleep 0.3
     printf 'p'
     sleep 0.3
-    printf '\033[<0;38;16M'
+    # Select the expanded insertion anchor so the screenshot shows its allele tally.
+    printf '\033[<0;24;16M'
     sleep 0.3
     printf 's'
     sleep 0.8

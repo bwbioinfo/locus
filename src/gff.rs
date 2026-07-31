@@ -51,6 +51,16 @@ impl GffFeature {
     pub fn to_region(&self) -> Region {
         Region::new(self.seqname.clone(), self.start, self.end)
     }
+
+    /// Return the feature interval with the padding used for feature navigation.
+    pub fn padded_region(&self) -> Region {
+        let pad = self.end.saturating_sub(self.start) / 10 + 1;
+        Region::new(
+            self.seqname.clone(),
+            self.start.saturating_sub(pad),
+            self.end.saturating_add(pad),
+        )
+    }
 }
 
 /// Holds all parsed GFF3/GTF features with lookup indices.
@@ -204,6 +214,32 @@ impl GffStore {
         exact
     }
 
+    /// Resolve the most specific feature matching `query`.
+    ///
+    /// Exact identifier or name matches rank above prefix and substring matches. When a gene and
+    /// its child features share an annotation name, the gene record is selected for navigation.
+    pub fn resolve_feature(&self, query: &str) -> Option<&GffFeature> {
+        let query = query.trim();
+        if query.is_empty() {
+            return None;
+        }
+
+        let query_lower = query.to_lowercase();
+        self.search(query)
+            .into_iter()
+            .min_by_key(|&idx| {
+                let feature = &self.features[idx];
+                (
+                    feature_match_rank(feature, &query_lower),
+                    usize::from(!feature.feature_type.eq_ignore_ascii_case("gene")),
+                    feature.start,
+                    feature.end,
+                    idx,
+                )
+            })
+            .map(|idx| &self.features[idx])
+    }
+
     /// Return features overlapping [start, end) on the given contig.
     pub fn features_in_region(&self, contig: &str, start: u64, end: u64) -> Vec<GffFeature> {
         if let Some(path) = self.indexed_path.as_deref()
@@ -226,6 +262,22 @@ impl GffStore {
     #[cfg(test)]
     fn has_tabix_index(&self) -> bool {
         self.indexed_path.is_some()
+    }
+}
+
+fn feature_match_rank(feature: &GffFeature, query_lower: &str) -> u8 {
+    let names = [&feature.id, &feature.name, &feature.gene_name]
+        .into_iter()
+        .flatten()
+        .map(|name| name.to_lowercase())
+        .collect::<Vec<_>>();
+
+    if names.iter().any(|name| name == query_lower) {
+        0
+    } else if names.iter().any(|name| name.starts_with(query_lower)) {
+        1
+    } else {
+        2
     }
 }
 
@@ -622,6 +674,26 @@ mod tests {
             .map(|&i| store.features[i].name.as_deref().unwrap())
             .collect();
         assert!(names.contains(&"BRCA1"));
+    }
+
+    #[test]
+    fn resolve_feature_prefers_an_exact_gene_and_pads_its_region() {
+        let features = vec![
+            make_feature("chr13", "exon", 100, 150, Some("exon1"), Some("RB1")),
+            make_feature("chr13", "mRNA", 100, 300, Some("tx1"), Some("RB1")),
+            make_feature("chr13", "gene", 100, 300, Some("gene1"), Some("RB1")),
+        ];
+        let name_index = build_name_index(&features);
+        let store = GffStore {
+            features,
+            name_index,
+            indexed_path: None,
+        };
+
+        let feature = store.resolve_feature("rb1").expect("resolve RB1");
+
+        assert_eq!(feature.feature_type, "gene");
+        assert_eq!(feature.padded_region(), Region::new("chr13", 79, 321));
     }
 
     #[test]

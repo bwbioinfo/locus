@@ -31,12 +31,30 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     if app.mode != Mode::Normal || app.show_help {
         return;
     }
-    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-        return;
-    }
 
-    if let Some(position) = ui::genomic_position_at(app, mouse.column, mouse.row) {
-        app.select_reference_position(position);
+    match mouse.kind {
+        MouseEventKind::ScrollDown => {
+            if let Some(track) = ui::read_track_at(app, mouse.column, mouse.row) {
+                app.scroll_read_track(track, 1);
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            if let Some(track) = ui::read_track_at(app, mouse.column, mouse.row) {
+                app.scroll_read_track(track, -1);
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                if let Some(read_idx) = ui::read_index_at(app, mouse.column, mouse.row) {
+                    app.select_read(read_idx);
+                } else {
+                    app.clear_selected_read();
+                }
+            } else if let Some(position) = ui::genomic_position_at(app, mouse.column, mouse.row) {
+                app.select_reference_position(position);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -53,20 +71,58 @@ fn dispatch(app: &mut App, key: KeyEvent) -> Result<()> {
 
 fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
     let step = app.view_span().max(1) / 5;
-    let big_step = app.view_span().max(1) / 2;
+
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        match key.code {
+            KeyCode::Left => {
+                app.pan_large(-1);
+                return Ok(());
+            }
+            KeyCode::Right => {
+                app.pan_large(1);
+                return Ok(());
+            }
+            KeyCode::Up => {
+                app.scroll_active_read_track(-1);
+                return Ok(());
+            }
+            KeyCode::Down => {
+                app.scroll_active_read_track(1);
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Up => {
+                app.cycle_active_read_track(false);
+                return Ok(());
+            }
+            KeyCode::Down => {
+                app.cycle_active_read_track(true);
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
 
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Char('?') => app.show_help = !app.show_help,
+        KeyCode::Esc if app.show_help => app.show_help = false,
+        KeyCode::Esc => app.clear_selected_position(),
 
         KeyCode::Char('h') | KeyCode::Left => app.pan(-(step as i64)),
         KeyCode::Char('l') | KeyCode::Right => app.pan(step as i64),
-        KeyCode::Char('H') => app.pan(-(big_step as i64)),
-        KeyCode::Char('L') => app.pan(big_step as i64),
+        KeyCode::Char('H') => app.pan_large(-1),
+        KeyCode::Char('L') => app.pan_large(1),
 
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Up => app.zoom_in(),
         KeyCode::Char('-') | KeyCode::Down => app.zoom_out(),
         KeyCode::Char('i') => app.toggle_insertions(),
+        KeyCode::Char('b') => app.toggle_selection_brackets(),
         KeyCode::Char('m') => app.toggle_methylation(),
         KeyCode::Char('p') => app.toggle_phasing(),
         KeyCode::Char('t') => app.toggle_theme(),
@@ -216,7 +272,11 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::{bam::BamSource, theme::Theme};
+    use crate::{
+        bam::BamSource,
+        cache::{CigarOp, ReadPhase, RenderRead, Strand},
+        theme::Theme,
+    };
 
     #[test]
     fn p_key_toggles_phasing_without_fetching() {
@@ -233,6 +293,63 @@ mod tests {
 
         assert!(app.show_phasing);
         assert!(!app.needs_fetch);
+    }
+
+    #[test]
+    fn b_key_toggles_selection_brackets_without_fetching() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.needs_fetch = false;
+
+        handle_normal(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+        )
+        .expect("handle selection-bracket toggle");
+
+        assert!(!app.show_selection_brackets);
+        assert!(!app.needs_fetch);
+    }
+
+    #[test]
+    fn escape_clears_selected_position_without_refetching() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        let selected = app.view_start;
+        app.show_phasing = true;
+        app.select_reference_position(selected);
+        app.selected_insertion_ref_pos = Some(selected);
+        app.selected_read_idx = Some(0);
+        app.needs_fetch = false;
+
+        handle_normal(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("clear selection");
+
+        assert!(app.selected_ref_pos.is_none());
+        assert!(app.selected_insertion_ref_pos.is_none());
+        assert!(app.selected_allele_tally.is_none());
+        assert!(app.selected_phase_allele_tallies.is_none());
+        assert!(app.selected_read().is_none());
+        assert!(!app.needs_fetch);
+    }
+
+    #[test]
+    fn escape_dismisses_help_without_clearing_selected_position() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        let selected = app.view_start;
+        app.select_reference_position(selected);
+        app.show_help = true;
+
+        handle_normal(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("dismiss help");
+
+        assert!(!app.show_help);
+        assert_eq!(app.selected_ref_pos, Some(selected));
+        assert!(app.selected_allele_tally.is_some());
     }
 
     #[test]
@@ -260,6 +377,65 @@ mod tests {
     }
 
     #[test]
+    fn shift_click_selects_the_read_under_the_pointer() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 80;
+        app.terminal_rows = 24;
+        app.needs_fetch = false;
+
+        let position = ui::genomic_position_at(&app, 20, 6).expect("canvas position");
+        app.cache.reads = vec![RenderRead {
+            name: "shift-click-read".to_string(),
+            start: position,
+            end: position + 1,
+            strand: Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![CigarOp::Match(1)],
+            sequence: vec![b'A'],
+            methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
+            phase: ReadPhase::default(),
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        }];
+        app.cache.pileup_rows = vec![vec![0]];
+        app.select_reference_position(position);
+
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 20,
+                row: 6,
+                modifiers: KeyModifiers::SHIFT,
+            },
+        );
+
+        assert_eq!(
+            app.selected_read().map(|read| read.name.as_str()),
+            Some("shift-click-read")
+        );
+        assert!(app.selected_ref_pos.is_none());
+        assert!(!app.needs_fetch);
+
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 20,
+                row: 6,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+
+        assert_eq!(app.selected_ref_pos, Some(position));
+        assert!(app.selected_read().is_none());
+    }
+
+    #[test]
     fn mouse_clicks_ignore_chrome_and_overlays() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
         let source = BamSource::open(path).expect("open demo BAM");
@@ -279,5 +455,72 @@ mod tests {
         app.show_help = true;
         handle_mouse(&mut app, MouseEvent { row: 6, ..click });
         assert!(app.selected_ref_pos.is_none());
+    }
+
+    #[test]
+    fn keyboard_and_mouse_scroll_target_the_expected_read_track() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 80;
+        app.terminal_rows = 24;
+        app.cache.pileup_rows = vec![Vec::new(); 20];
+
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 20,
+                row: 6,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.read_track_scroll(crate::app::ReadTrack::Combined), 1);
+
+        app.show_phasing = true;
+        app.cache.phase_layout = Some(crate::cache::PhasePileupLayout {
+            hp1_rows: 0..3,
+            hp2_rows: 3..6,
+            unphased_rows: Some(6..9),
+            hp1_viewport_rows: 2,
+            hp2_viewport_rows: 2,
+            unphased_viewport_rows: 1,
+        });
+
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 20,
+                row: 10,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.active_read_track, crate::app::ReadTrack::Hp2);
+        assert_eq!(app.read_track_scroll(crate::app::ReadTrack::Hp2), 1);
+
+        handle_normal(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL))
+            .expect("cycle active track");
+        assert_eq!(app.active_read_track, crate::app::ReadTrack::Hp1);
+
+        handle_normal(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT))
+            .expect("scroll active track");
+        assert_eq!(app.read_track_scroll(crate::app::ReadTrack::Hp1), 1);
+    }
+
+    #[test]
+    fn shift_right_pans_by_one_thousand_bp() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.source.contigs[0].length = 10_000;
+        app.view_start = 100;
+        app.view_end = 200;
+
+        handle_normal(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT))
+            .expect("large pan");
+
+        assert_eq!(app.view_start, 1_100);
+        assert_eq!(app.view_end, 1_200);
     }
 }

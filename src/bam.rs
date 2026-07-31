@@ -225,6 +225,7 @@ fn record_to_render(record: &bam::Record) -> Option<RenderRead> {
     // Decode 4-bit packed sequence. as_ref() gives the raw encoded bytes.
     let sequence = decode_sequence(record.sequence().as_ref(), read_len);
     let methylation = parse_record_methylation(record, &sequence);
+    let deleted_reference_sequences = parse_record_md_deletions(record);
     let phase = parse_record_phase(record);
 
     let end_0based = start_0based + ref_span;
@@ -248,6 +249,7 @@ fn record_to_render(record: &bam::Record) -> Option<RenderRead> {
         cigar_ops,
         sequence,
         methylation,
+        deleted_reference_sequences,
         phase,
         is_secondary: flags.is_secondary(),
         is_supplementary: flags.is_supplementary(),
@@ -303,6 +305,40 @@ fn parse_record_methylation(
     parse_modified_bases(mm, ml.as_deref(), sequence)
 }
 
+fn parse_record_md_deletions(record: &bam::Record) -> Vec<Vec<u8>> {
+    let data = record.data();
+    let Some(Value::String(value)) = data.get(&Tag::new(b'M', b'D')).and_then(Result::ok) else {
+        return Vec::new();
+    };
+    let Ok(md) = std::str::from_utf8(value.as_ref()) else {
+        return Vec::new();
+    };
+
+    parse_md_deletion_sequences(md)
+}
+
+fn parse_md_deletion_sequences(md: &str) -> Vec<Vec<u8>> {
+    let mut sequences = Vec::new();
+    let mut bytes = md.bytes().peekable();
+
+    while let Some(byte) = bytes.next() {
+        if byte != b'^' {
+            continue;
+        }
+
+        let sequence = bytes
+            .by_ref()
+            .take_while(|byte| byte.is_ascii_alphabetic())
+            .map(|byte| byte.to_ascii_uppercase())
+            .collect::<Vec<_>>();
+        if !sequence.is_empty() {
+            sequences.push(sequence);
+        }
+    }
+
+    sequences
+}
+
 fn initial_region_for_alignment(contig: &ContigInfo, alignment_start: u64) -> Region {
     let span = DEFAULT_VIEW_SPAN.min(contig.length);
     let start = alignment_start
@@ -329,6 +365,15 @@ mod tests {
     fn phase_tag_values_reject_negative_and_non_integer_values() {
         assert_eq!(parse_unsigned_integer_value(Value::Int32(-1)), None);
         assert_eq!(parse_unsigned_integer_value(Value::Float(1.0)), None);
+    }
+
+    #[test]
+    fn md_deletion_sequences_are_collected_in_cigar_order() {
+        assert_eq!(
+            parse_md_deletion_sequences("10^atcg5A2^G0"),
+            vec![b"ATCG".to_vec(), b"G".to_vec()]
+        );
+        assert!(parse_md_deletion_sequences("10A5").is_empty());
     }
 
     #[test]
@@ -399,6 +444,13 @@ mod tests {
             ReadPhase {
                 haplotype: Some(2),
                 phase_set: Some(50),
+            }
+        );
+        assert_eq!(
+            phase_for("read_hp1_ps100"),
+            ReadPhase {
+                haplotype: Some(1),
+                phase_set: Some(100),
             }
         );
         assert_eq!(phase_for("read_reverse_meth"), ReadPhase::default());

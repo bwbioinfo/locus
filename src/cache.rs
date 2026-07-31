@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{collections::BTreeMap, ops::Range};
 
 use crate::{reference::ReferenceSlice, region::Region};
 
@@ -75,10 +75,67 @@ pub struct RenderRead {
     /// ASCII-decoded read sequence (A/C/G/T/N), read-coordinate indexed.
     pub sequence: Vec<u8>,
     pub methylation: Vec<ModifiedBaseCall>,
+    /// Deleted reference alleles from the MD tag, in CIGAR deletion order.
+    pub deleted_reference_sequences: Vec<Vec<u8>>,
     pub phase: ReadPhase,
     pub is_secondary: bool,
     pub is_supplementary: bool,
     pub is_duplicate: bool,
+}
+
+/// Alleles observed at one reference position across a set of reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PositionAlleleTally {
+    pub base_counts: BTreeMap<u8, usize>,
+    /// Deleted reference alleles when the corresponding FASTA sequence is available.
+    pub deletion_counts: BTreeMap<Vec<u8>, usize>,
+    /// Deletions whose reference sequence was not available in the cached slice.
+    pub deletion_count: usize,
+    pub insertion_counts: BTreeMap<Vec<u8>, usize>,
+    /// Reads with one or more modified-base calls aligned at this position.
+    pub methylated_read_count: usize,
+    /// Reads with an aligned query base but no modified-base call at this position.
+    pub unmodified_read_count: usize,
+    /// Reads with an aligned query base at this position.
+    pub total_read_count: usize,
+}
+
+/// Allele tallies separated by haplotype for a selected reference position.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhasePositionAlleleTallies {
+    pub hp1: PositionAlleleTally,
+    pub hp2: PositionAlleleTally,
+    pub unphased: PositionAlleleTally,
+}
+
+impl PositionAlleleTally {
+    fn add_base(&mut self, base: u8) {
+        *self
+            .base_counts
+            .entry(base.to_ascii_uppercase())
+            .or_default() += 1;
+    }
+
+    fn add_insertion(&mut self, sequence: Vec<u8>) {
+        *self.insertion_counts.entry(sequence).or_default() += 1;
+    }
+
+    fn add_deletion(&mut self, sequence: Option<Vec<u8>>) {
+        if let Some(sequence) = sequence {
+            *self.deletion_counts.entry(sequence).or_default() += 1;
+        } else {
+            self.deletion_count += 1;
+        }
+    }
+
+    fn add_aligned_base_read(&mut self, methylated: bool) {
+        self.total_read_count += 1;
+        if methylated {
+            self.methylated_read_count += 1;
+        } else {
+            self.unmodified_read_count += 1;
+        }
+    }
 }
 
 impl RenderRead {
@@ -127,6 +184,118 @@ impl RenderRead {
 
         aligned
     }
+
+    fn tally_alleles_at(
+        &self,
+        position: u64,
+        reference: Option<&ReferenceSlice>,
+        tally: &mut PositionAlleleTally,
+        unresolved_deletions: &mut BTreeMap<(u64, u64), usize>,
+    ) {
+        let methylated = self
+            .aligned_methylation()
+            .iter()
+            .any(|call| call.ref_pos == Some(position));
+
+        let mut read_pos = 0usize;
+        let mut ref_pos = self.start;
+        let mut deletion_idx = 0usize;
+
+        for &op in &self.cigar_ops {
+            match op {
+                CigarOp::SoftClip(n) => read_pos += n as usize,
+                CigarOp::Match(n) | CigarOp::Mismatch(n) => {
+                    let end = ref_pos.saturating_add(n);
+                    if (ref_pos..end).contains(&position) {
+                        let offset = (position - ref_pos) as usize;
+                        let base = self
+                            .sequence
+                            .get(read_pos + offset)
+                            .copied()
+                            .unwrap_or(b'N');
+                        tally.add_base(base);
+                        tally.add_aligned_base_read(methylated);
+                    }
+                    read_pos += n as usize;
+                    ref_pos = end;
+                }
+                CigarOp::Insertion(n) => {
+                    if ref_pos.saturating_sub(1) == position {
+                        let sequence = (0..n as usize)
+                            .map(|offset| {
+                                self.sequence
+                                    .get(read_pos + offset)
+                                    .copied()
+                                    .unwrap_or(b'N')
+                                    .to_ascii_uppercase()
+                            })
+                            .collect();
+                        tally.add_insertion(sequence);
+                    }
+                    read_pos += n as usize;
+                }
+                CigarOp::Deletion(n) => {
+                    let end = ref_pos.saturating_add(n);
+                    if (ref_pos..end).contains(&position) {
+                        let sequence = reference
+                            .and_then(|reference| {
+                                (ref_pos..end)
+                                    .map(|deleted_pos| reference.base_at(deleted_pos))
+                                    .collect::<Option<Vec<_>>>()
+                            })
+                            .or_else(|| {
+                                self.deleted_reference_sequences
+                                    .get(deletion_idx)
+                                    .filter(|sequence| sequence.len() == n as usize)
+                                    .cloned()
+                            });
+                        if let Some(sequence) = sequence {
+                            tally.add_deletion(Some(sequence));
+                        } else {
+                            tally.add_deletion(None);
+                            *unresolved_deletions.entry((ref_pos, n)).or_default() += 1;
+                        }
+                    }
+                    deletion_idx += 1;
+                    ref_pos = end;
+                }
+                // A CIGAR skip is an intron or other reference skip, not an indel allele.
+                CigarOp::Skip(n) => ref_pos += n,
+            }
+        }
+    }
+
+    /// Return the query base aligned to one reference position, if this read covers it.
+    fn base_at_reference_position(&self, position: u64) -> Option<u8> {
+        let mut read_pos = 0usize;
+        let mut ref_pos = self.start;
+
+        for &op in &self.cigar_ops {
+            match op {
+                CigarOp::SoftClip(n) | CigarOp::Insertion(n) => read_pos += n as usize,
+                CigarOp::Match(n) | CigarOp::Mismatch(n) => {
+                    let end = ref_pos.saturating_add(n);
+                    if (ref_pos..end).contains(&position) {
+                        return self
+                            .sequence
+                            .get(read_pos + (position - ref_pos) as usize)
+                            .copied();
+                    }
+                    read_pos += n as usize;
+                    ref_pos = end;
+                }
+                CigarOp::Deletion(n) | CigarOp::Skip(n) => {
+                    let end = ref_pos.saturating_add(n);
+                    if (ref_pos..end).contains(&position) {
+                        return None;
+                    }
+                    ref_pos = end;
+                }
+            }
+        }
+
+        None
+    }
 }
 
 /// A single row of the pileup, containing non-overlapping reads.
@@ -142,9 +311,10 @@ pub struct PhasePileupLayout {
     pub hp1_rows: Range<usize>,
     pub hp2_rows: Range<usize>,
     pub unphased_rows: Option<Range<usize>>,
-    pub hp1_hidden: usize,
-    pub hp2_hidden: usize,
-    pub unphased_hidden: usize,
+    /// Rows visible at once in each independently scrollable section.
+    pub hp1_viewport_rows: usize,
+    pub hp2_viewport_rows: usize,
+    pub unphased_viewport_rows: usize,
 }
 
 /// Cached data for the currently visible region.
@@ -162,8 +332,6 @@ pub struct RegionCache {
     pub coverage: CoverageBins,
     /// Reference bases for the padded region, when a FASTA was supplied.
     pub reference: Option<ReferenceSlice>,
-    /// How many reads were hidden because pileup depth was exceeded.
-    pub hidden_reads: usize,
 }
 
 impl RegionCache {
@@ -175,10 +343,11 @@ impl RegionCache {
         self.phase_layout = None;
         self.coverage.clear();
         self.reference = None;
-        self.hidden_reads = 0;
     }
 
-    /// Rebuild pileup layout for the visible sub-region, limited to `max_height` rows.
+    /// Rebuild the complete pileup layout for the visible sub-region.
+    ///
+    /// `max_height` determines the viewport capacity; it never discards packed rows.
     pub fn layout_pileup(
         &mut self,
         visible: &Region,
@@ -199,8 +368,7 @@ impl RegionCache {
         if separate_phases {
             self.layout_phased_pileup(&visible_reads, max_height);
         } else {
-            self.pileup_rows = pack_reads(&visible_reads, &self.reads, max_height);
-            self.hidden_reads = hidden_read_count(&visible_reads, &self.pileup_rows);
+            self.pileup_rows = pack_reads(&visible_reads, &self.reads, usize::MAX);
             self.phase_layout = None;
         }
     }
@@ -221,15 +389,15 @@ impl RegionCache {
         let has_unphased = !unphased.is_empty();
         let header_rows = 2 + usize::from(has_unphased);
         let row_budget = max_height.saturating_sub(header_rows);
-        let (hp1_limit, hp2_limit, unphased_limit) = phase_row_limits(row_budget, has_unphased);
-
-        let hp1_rows = pack_reads(&hp1, &self.reads, hp1_limit);
-        let hp2_rows = pack_reads(&hp2, &self.reads, hp2_limit);
-        let unphased_rows = pack_reads(&unphased, &self.reads, unphased_limit);
-
-        let hp1_hidden = hidden_read_count(&hp1, &hp1_rows);
-        let hp2_hidden = hidden_read_count(&hp2, &hp2_rows);
-        let unphased_hidden = hidden_read_count(&unphased, &unphased_rows);
+        let hp1_rows = pack_reads(&hp1, &self.reads, usize::MAX);
+        let hp2_rows = pack_reads(&hp2, &self.reads, usize::MAX);
+        let unphased_rows = pack_reads(&unphased, &self.reads, usize::MAX);
+        let (hp1_viewport_rows, hp2_viewport_rows, unphased_viewport_rows) =
+            reclaim_unused_phase_rows(
+                row_budget,
+                [hp1_rows.len(), hp2_rows.len(), unphased_rows.len()],
+                has_unphased,
+            );
 
         let hp1_end = hp1_rows.len();
         let hp2_end = hp1_end + hp2_rows.len();
@@ -238,14 +406,13 @@ impl RegionCache {
         self.pileup_rows = hp1_rows;
         self.pileup_rows.extend(hp2_rows);
         self.pileup_rows.extend(unphased_rows);
-        self.hidden_reads = hp1_hidden + hp2_hidden + unphased_hidden;
         self.phase_layout = Some(PhasePileupLayout {
             hp1_rows: 0..hp1_end,
             hp2_rows: hp1_end..hp2_end,
             unphased_rows: has_unphased.then_some(hp2_end..unphased_end),
-            hp1_hidden,
-            hp2_hidden,
-            unphased_hidden,
+            hp1_viewport_rows,
+            hp2_viewport_rows,
+            unphased_viewport_rows,
         });
     }
 
@@ -253,12 +420,104 @@ impl RegionCache {
     pub fn compute_coverage(&mut self, visible: &Region, cols: usize, min_mapq: u8) {
         self.coverage = bin_coverage(&self.reads, visible, cols, min_mapq);
     }
-}
 
-fn hidden_read_count(indices: &[usize], rows: &[PileupRow]) -> usize {
-    indices
-        .len()
-        .saturating_sub(rows.iter().map(Vec::len).sum::<usize>())
+    /// Count read alleles at `position` across all loaded reads passing `min_mapq`.
+    ///
+    /// This intentionally does not use `pileup_rows`: row capacity is a display concern and
+    /// should not change a position's allele tally.
+    pub fn allele_tally_at(&self, position: u64, min_mapq: u8) -> PositionAlleleTally {
+        self.allele_tally_at_filtered(position, min_mapq, &|_| true)
+    }
+
+    /// Count read alleles at `position` independently for each phase group.
+    pub fn phase_allele_tallies_at(
+        &self,
+        position: u64,
+        min_mapq: u8,
+    ) -> PhasePositionAlleleTallies {
+        PhasePositionAlleleTallies {
+            hp1: self.allele_tally_at_filtered(position, min_mapq, &|read| {
+                read.phase.haplotype == Some(1)
+            }),
+            hp2: self.allele_tally_at_filtered(position, min_mapq, &|read| {
+                read.phase.haplotype == Some(2)
+            }),
+            unphased: self.allele_tally_at_filtered(position, min_mapq, &|read| {
+                !matches!(read.phase.haplotype, Some(1) | Some(2))
+            }),
+        }
+    }
+
+    fn allele_tally_at_filtered<F>(
+        &self,
+        position: u64,
+        min_mapq: u8,
+        include: &F,
+    ) -> PositionAlleleTally
+    where
+        F: Fn(&RenderRead) -> bool,
+    {
+        let mut tally = PositionAlleleTally::default();
+        let mut unresolved_deletions = BTreeMap::new();
+        for read in self
+            .reads
+            .iter()
+            .filter(|read| read.mapq >= min_mapq && include(read))
+        {
+            read.tally_alleles_at(
+                position,
+                self.reference.as_ref(),
+                &mut tally,
+                &mut unresolved_deletions,
+            );
+        }
+
+        for ((start, len), count) in unresolved_deletions {
+            let end = start.saturating_add(len);
+            let Some(sequence) =
+                self.pileup_consensus_sequence_filtered(start, end, min_mapq, include)
+            else {
+                continue;
+            };
+            tally.deletion_count = tally.deletion_count.saturating_sub(count);
+            for _ in 0..count {
+                tally.add_deletion(Some(sequence.clone()));
+            }
+        }
+        tally
+    }
+
+    /// Infer absent deleted reference bases from reads that align across the deletion span.
+    fn pileup_consensus_sequence_filtered<F>(
+        &self,
+        start: u64,
+        end: u64,
+        min_mapq: u8,
+        include: &F,
+    ) -> Option<Vec<u8>>
+    where
+        F: Fn(&RenderRead) -> bool,
+    {
+        (start..end)
+            .map(|position| {
+                let mut counts = BTreeMap::new();
+                for read in self
+                    .reads
+                    .iter()
+                    .filter(|read| read.mapq >= min_mapq && include(read))
+                {
+                    let Some(base) = read.base_at_reference_position(position) else {
+                        continue;
+                    };
+                    *counts.entry(base.to_ascii_uppercase()).or_insert(0usize) += 1;
+                }
+                counts
+                    .into_iter()
+                    .max_by_key(|(_, count)| *count)
+                    .map(|(base, _)| base)
+            })
+            .collect()
+    }
 }
 
 fn phase_row_limits(total_rows: usize, has_unphased: bool) -> (usize, usize, usize) {
@@ -269,6 +528,39 @@ fn phase_row_limits(total_rows: usize, has_unphased: bool) -> (usize, usize, usi
     let unphased_rows = (total_rows / 5).max(1);
     let phased_rows = total_rows - unphased_rows;
     (phased_rows.div_ceil(2), phased_rows / 2, unphased_rows)
+}
+
+fn reclaim_unused_phase_rows(
+    total_rows: usize,
+    required_rows: [usize; 3],
+    has_unphased: bool,
+) -> (usize, usize, usize) {
+    let (hp1, hp2, unphased) = phase_row_limits(total_rows, has_unphased);
+    let mut limits = [hp1, hp2, unphased];
+    for (limit, required) in limits.iter_mut().zip(required_rows) {
+        *limit = (*limit).min(required);
+    }
+
+    let mut remaining = total_rows.saturating_sub(limits.into_iter().sum::<usize>());
+    while remaining > 0 {
+        let mut assigned = false;
+        for idx in 0..limits.len() {
+            if limits[idx] >= required_rows[idx] {
+                continue;
+            }
+            limits[idx] += 1;
+            remaining -= 1;
+            assigned = true;
+            if remaining == 0 {
+                break;
+            }
+        }
+        if !assigned {
+            break;
+        }
+    }
+
+    (limits[0], limits[1], limits[2])
 }
 
 /// Greedy row-packing: sort reads by start, assign each to the first row where it fits.
@@ -290,7 +582,7 @@ fn pack_reads(indices: &[usize], reads: &[RenderRead], max_rows: usize) -> Vec<P
             .unwrap_or(row_ends.len());
 
         if target_row >= max_rows {
-            // Skip — hidden reads counted by caller
+            // The caller requested a bounded packing layout.
             continue;
         }
 
@@ -352,6 +644,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(end - start)],
             sequence: vec![b'A'; len],
             methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
             phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
@@ -420,7 +713,6 @@ mod tests {
         cache.compute_coverage(&visible, 10, 30);
 
         assert_eq!(cache.pileup_rows, vec![vec![1]]);
-        assert_eq!(cache.hidden_reads, 0);
         assert!(cache.coverage.iter().all(|&count| count == 1));
         assert_eq!(cache.reads.len(), 2);
 
@@ -429,7 +721,171 @@ mod tests {
         assert!(layout.hp1_rows.is_empty());
         assert_eq!(layout.hp2_rows, 0..1);
         assert_eq!(cache.pileup_rows, vec![vec![1]]);
-        assert_eq!(cache.hidden_reads, 0);
+    }
+
+    #[test]
+    fn allele_tally_counts_bases_snvs_and_reference_indels_without_skips() {
+        let mut matched = make_read("matched", 100, 103);
+        matched.sequence = b"AAA".to_vec();
+
+        let mut mismatch = make_read("snv", 100, 103);
+        mismatch.cigar_ops = vec![CigarOp::Mismatch(3)];
+        mismatch.sequence = b"ACA".to_vec();
+
+        let mut inserted = make_read("inserted", 100, 103);
+        inserted.cigar_ops = vec![CigarOp::Match(1), CigarOp::Insertion(2), CigarOp::Match(2)];
+        inserted.sequence = b"AGGTC".to_vec();
+
+        let mut deleted = make_read("deleted", 100, 105);
+        deleted.cigar_ops = vec![CigarOp::Match(1), CigarOp::Deletion(3), CigarOp::Match(1)];
+        deleted.sequence = b"AC".to_vec();
+
+        let mut skipped = make_read("skipped", 100, 104);
+        skipped.cigar_ops = vec![CigarOp::Match(1), CigarOp::Skip(2), CigarOp::Match(1)];
+        skipped.sequence = b"AT".to_vec();
+
+        let mut low_mapq = make_read("low-mapq", 100, 103);
+        low_mapq.mapq = 20;
+        low_mapq.sequence = b"GGG".to_vec();
+
+        let cache = RegionCache {
+            reads: vec![matched, mismatch, inserted, deleted, skipped, low_mapq],
+            reference: Some(ReferenceSlice {
+                start: 100,
+                bases: b"AACTG".to_vec(),
+            }),
+            ..RegionCache::default()
+        };
+
+        let tally = cache.allele_tally_at(101, 30);
+
+        assert_eq!(tally.base_counts.get(&b'A'), Some(&1));
+        assert_eq!(tally.base_counts.get(&b'C'), Some(&1));
+        assert_eq!(tally.base_counts.get(&b'T'), Some(&1));
+        assert!(!tally.base_counts.contains_key(&b'G'));
+        assert_eq!(tally.deletion_counts.get(b"ACT" as &[u8]), Some(&1));
+        assert_eq!(tally.deletion_count, 0);
+        assert!(tally.insertion_counts.is_empty());
+        assert_eq!(tally.methylated_read_count, 0);
+        assert_eq!(tally.unmodified_read_count, 3);
+        assert_eq!(tally.total_read_count, 3);
+
+        let insertion_tally = cache.allele_tally_at(100, 30);
+        assert_eq!(
+            insertion_tally.insertion_counts.get(b"GG" as &[u8]),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn phase_allele_tallies_group_indels_and_deduplicated_methylation() {
+        let mut hp1 = make_read("hp1", 100, 103);
+        hp1.sequence = b"CAA".to_vec();
+        hp1.phase.haplotype = Some(1);
+        let mut hydroxymethylated = methylated_call(0);
+        hydroxymethylated.modification = "h".to_string();
+        hp1.methylation = vec![methylated_call(0), hydroxymethylated];
+
+        let mut hp1_unmodified = make_read("hp1-unmodified", 100, 103);
+        hp1_unmodified.sequence = b"TAA".to_vec();
+        hp1_unmodified.phase.haplotype = Some(1);
+
+        let mut hp2 = make_read("hp2", 100, 103);
+        hp2.cigar_ops = vec![CigarOp::Deletion(1), CigarOp::Match(2)];
+        hp2.sequence = b"AA".to_vec();
+        hp2.phase.haplotype = Some(2);
+
+        let mut unphased = make_read("unphased", 100, 103);
+        unphased.cigar_ops = vec![CigarOp::Match(1), CigarOp::Insertion(2), CigarOp::Match(2)];
+        unphased.sequence = b"CGGAA".to_vec();
+        unphased.methylation = vec![methylated_call(0)];
+
+        let cache = RegionCache {
+            reads: vec![hp1, hp1_unmodified, hp2, unphased],
+            ..RegionCache::default()
+        };
+
+        let tallies = cache.phase_allele_tallies_at(100, 0);
+        let combined = cache.allele_tally_at(100, 0);
+
+        assert_eq!(combined.methylated_read_count, 2);
+        assert_eq!(combined.unmodified_read_count, 1);
+        assert_eq!(combined.total_read_count, 3);
+        assert_eq!(tallies.hp1.base_counts.get(&b'C'), Some(&1));
+        assert_eq!(tallies.hp1.base_counts.get(&b'T'), Some(&1));
+        assert_eq!(tallies.hp1.methylated_read_count, 1);
+        assert_eq!(tallies.hp1.unmodified_read_count, 1);
+        assert_eq!(tallies.hp1.total_read_count, 2);
+        assert!(tallies.hp2.deletion_counts.is_empty());
+        assert_eq!(tallies.hp2.deletion_count, 1);
+        assert_eq!(tallies.hp2.methylated_read_count, 0);
+        assert_eq!(tallies.hp2.unmodified_read_count, 0);
+        assert_eq!(tallies.hp2.total_read_count, 0);
+        assert_eq!(tallies.unphased.base_counts.get(&b'C'), Some(&1));
+        assert_eq!(
+            tallies.unphased.insertion_counts.get(b"GG" as &[u8]),
+            Some(&1)
+        );
+        assert_eq!(tallies.unphased.methylated_read_count, 1);
+        assert_eq!(tallies.unphased.unmodified_read_count, 0);
+        assert_eq!(tallies.unphased.total_read_count, 1);
+    }
+
+    #[test]
+    fn allele_tally_uses_md_deleted_sequence_without_a_reference_slice() {
+        let mut deleted = make_read("deleted", 100, 106);
+        deleted.cigar_ops = vec![CigarOp::Match(1), CigarOp::Deletion(4), CigarOp::Match(1)];
+        deleted.sequence = b"AC".to_vec();
+        deleted.deleted_reference_sequences = vec![b"ATCG".to_vec()];
+
+        let cache = RegionCache {
+            reads: vec![deleted],
+            ..RegionCache::default()
+        };
+
+        let tally = cache.allele_tally_at(101, 0);
+
+        assert_eq!(tally.deletion_counts.get(b"ATCG" as &[u8]), Some(&1));
+        assert_eq!(tally.deletion_count, 0);
+    }
+
+    #[test]
+    fn allele_tally_uses_pileup_consensus_for_deleted_sequence_without_reference_or_md() {
+        let mut deleted = make_read("deleted", 100, 106);
+        deleted.cigar_ops = vec![CigarOp::Match(1), CigarOp::Deletion(4), CigarOp::Match(1)];
+        deleted.sequence = b"AC".to_vec();
+
+        let mut support_a = make_read("support-a", 100, 106);
+        support_a.sequence = b"AATCGC".to_vec();
+        let mut support_b = make_read("support-b", 100, 106);
+        support_b.sequence = b"AATCGC".to_vec();
+
+        let cache = RegionCache {
+            reads: vec![deleted, support_a, support_b],
+            ..RegionCache::default()
+        };
+
+        let tally = cache.allele_tally_at(101, 0);
+
+        assert_eq!(tally.deletion_counts.get(b"ATCG" as &[u8]), Some(&1));
+        assert_eq!(tally.deletion_count, 0);
+    }
+
+    #[test]
+    fn allele_tally_keeps_generic_deletion_when_no_sequence_source_is_available() {
+        let mut deleted = make_read("deleted", 100, 106);
+        deleted.cigar_ops = vec![CigarOp::Match(1), CigarOp::Deletion(4), CigarOp::Match(1)];
+        deleted.sequence = b"AC".to_vec();
+
+        let cache = RegionCache {
+            reads: vec![deleted],
+            ..RegionCache::default()
+        };
+
+        let tally = cache.allele_tally_at(101, 0);
+
+        assert!(tally.deletion_counts.is_empty());
+        assert_eq!(tally.deletion_count, 1);
     }
 
     #[test]
@@ -461,11 +917,10 @@ mod tests {
         assert_eq!(cache.pileup_rows[2], vec![2]);
         assert_eq!(cache.pileup_rows[3], vec![3]);
         assert_eq!(cache.pileup_rows[4], vec![4, 5]);
-        assert_eq!(cache.hidden_reads, 0);
     }
 
     #[test]
-    fn phased_pileup_tracks_hidden_reads_per_section() {
+    fn phased_pileup_keeps_rows_beyond_each_section_viewport() {
         let visible = Region::new("chr1", 0, 100);
         let mut hp1_a = make_read("hp1-a", 0, 100);
         hp1_a.phase.haplotype = Some(1);
@@ -482,10 +937,54 @@ mod tests {
         cache.layout_pileup(&visible, 5, 0, true);
 
         let layout = cache.phase_layout.as_ref().expect("phase layout");
-        assert_eq!(layout.hp1_hidden, 1);
-        assert_eq!(layout.hp2_hidden, 0);
-        assert_eq!(layout.unphased_hidden, 1);
-        assert_eq!(cache.hidden_reads, 2);
+        assert_eq!(layout.hp1_rows, 0..2);
+        assert_eq!(layout.hp2_rows, 2..3);
+        assert_eq!(layout.unphased_rows, Some(3..4));
+        assert_eq!(layout.hp1_viewport_rows, 1);
+        assert_eq!(layout.hp2_viewport_rows, 1);
+        assert_eq!(layout.unphased_viewport_rows, 0);
+    }
+
+    #[test]
+    fn phased_pileup_reclaims_spare_rows_for_viewports() {
+        let visible = Region::new("chr1", 0, 100);
+        let mut hp1_a = make_read("hp1-a", 0, 100);
+        hp1_a.phase.haplotype = Some(1);
+        let mut hp1_b = make_read("hp1-b", 0, 100);
+        hp1_b.phase.haplotype = Some(1);
+        let mut hp1_c = make_read("hp1-c", 0, 100);
+        hp1_c.phase.haplotype = Some(1);
+        let mut hp2 = make_read("hp2", 0, 100);
+        hp2.phase.haplotype = Some(2);
+        let unphased = make_read("unphased", 0, 100);
+        let mut cache = RegionCache {
+            reads: vec![hp1_a, hp1_b, hp1_c, hp2, unphased],
+            ..RegionCache::default()
+        };
+
+        cache.layout_pileup(&visible, 8, 0, true);
+
+        let layout = cache.phase_layout.as_ref().expect("phase layout");
+        assert_eq!(layout.hp1_rows, 0..3);
+        assert_eq!(layout.hp2_rows, 3..4);
+        assert_eq!(layout.unphased_rows, Some(4..5));
+        assert_eq!(layout.hp1_viewport_rows, 3);
+        assert_eq!(layout.hp2_viewport_rows, 1);
+        assert_eq!(layout.unphased_viewport_rows, 1);
+    }
+
+    #[test]
+    fn standard_pileup_keeps_rows_beyond_the_viewport() {
+        let visible = Region::new("chr1", 0, 100);
+        let cache_reads = vec![make_read("first", 0, 100), make_read("second", 0, 100)];
+        let mut cache = RegionCache {
+            reads: cache_reads,
+            ..RegionCache::default()
+        };
+
+        cache.layout_pileup(&visible, 1, 0, false);
+
+        assert_eq!(cache.pileup_rows, vec![vec![0], vec![1]]);
     }
 
     #[test]
@@ -495,6 +994,12 @@ mod tests {
         assert_eq!(phase_row_limits(2, true), (1, 1, 0));
         assert_eq!(phase_row_limits(6, true), (3, 2, 1));
         assert_eq!(phase_row_limits(6, false), (3, 3, 0));
+    }
+
+    #[test]
+    fn reclaim_unused_phase_rows_uses_every_available_row() {
+        assert_eq!(reclaim_unused_phase_rows(5, [3, 1, 1], true), (3, 1, 1));
+        assert_eq!(reclaim_unused_phase_rows(6, [4, 1, 1], true), (4, 1, 1));
     }
 
     fn methylated_call(read_pos: usize) -> ModifiedBaseCall {
