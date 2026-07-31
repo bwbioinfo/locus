@@ -94,6 +94,10 @@ pub struct PositionAlleleTally {
     pub insertion_counts: BTreeMap<Vec<u8>, usize>,
     /// Reads with one or more modified-base calls aligned at this position.
     pub methylated_read_count: usize,
+    /// Reads with an aligned query base but no modified-base call at this position.
+    pub unmodified_read_count: usize,
+    /// Reads with an aligned query base at this position.
+    pub total_read_count: usize,
 }
 
 /// Allele tallies separated by haplotype for a selected reference position.
@@ -124,8 +128,13 @@ impl PositionAlleleTally {
         }
     }
 
-    fn add_methylated_read(&mut self) {
-        self.methylated_read_count += 1;
+    fn add_aligned_base_read(&mut self, methylated: bool) {
+        self.total_read_count += 1;
+        if methylated {
+            self.methylated_read_count += 1;
+        } else {
+            self.unmodified_read_count += 1;
+        }
     }
 }
 
@@ -183,13 +192,10 @@ impl RenderRead {
         tally: &mut PositionAlleleTally,
         unresolved_deletions: &mut BTreeMap<(u64, u64), usize>,
     ) {
-        if self
+        let methylated = self
             .aligned_methylation()
             .iter()
-            .any(|call| call.ref_pos == Some(position))
-        {
-            tally.add_methylated_read();
-        }
+            .any(|call| call.ref_pos == Some(position));
 
         let mut read_pos = 0usize;
         let mut ref_pos = self.start;
@@ -208,6 +214,7 @@ impl RenderRead {
                             .copied()
                             .unwrap_or(b'N');
                         tally.add_base(base);
+                        tally.add_aligned_base_read(methylated);
                     }
                     read_pos += n as usize;
                     ref_pos = end;
@@ -759,6 +766,9 @@ mod tests {
         assert_eq!(tally.deletion_counts.get(b"ACT" as &[u8]), Some(&1));
         assert_eq!(tally.deletion_count, 0);
         assert!(tally.insertion_counts.is_empty());
+        assert_eq!(tally.methylated_read_count, 0);
+        assert_eq!(tally.unmodified_read_count, 3);
+        assert_eq!(tally.total_read_count, 3);
 
         let insertion_tally = cache.allele_tally_at(100, 30);
         assert_eq!(
@@ -776,6 +786,10 @@ mod tests {
         hydroxymethylated.modification = "h".to_string();
         hp1.methylation = vec![methylated_call(0), hydroxymethylated];
 
+        let mut hp1_unmodified = make_read("hp1-unmodified", 100, 103);
+        hp1_unmodified.sequence = b"TAA".to_vec();
+        hp1_unmodified.phase.haplotype = Some(1);
+
         let mut hp2 = make_read("hp2", 100, 103);
         hp2.cigar_ops = vec![CigarOp::Deletion(1), CigarOp::Match(2)];
         hp2.sequence = b"AA".to_vec();
@@ -787,7 +801,7 @@ mod tests {
         unphased.methylation = vec![methylated_call(0)];
 
         let cache = RegionCache {
-            reads: vec![hp1, hp2, unphased],
+            reads: vec![hp1, hp1_unmodified, hp2, unphased],
             ..RegionCache::default()
         };
 
@@ -795,17 +809,26 @@ mod tests {
         let combined = cache.allele_tally_at(100, 0);
 
         assert_eq!(combined.methylated_read_count, 2);
+        assert_eq!(combined.unmodified_read_count, 1);
+        assert_eq!(combined.total_read_count, 3);
         assert_eq!(tallies.hp1.base_counts.get(&b'C'), Some(&1));
+        assert_eq!(tallies.hp1.base_counts.get(&b'T'), Some(&1));
         assert_eq!(tallies.hp1.methylated_read_count, 1);
+        assert_eq!(tallies.hp1.unmodified_read_count, 1);
+        assert_eq!(tallies.hp1.total_read_count, 2);
         assert!(tallies.hp2.deletion_counts.is_empty());
         assert_eq!(tallies.hp2.deletion_count, 1);
         assert_eq!(tallies.hp2.methylated_read_count, 0);
+        assert_eq!(tallies.hp2.unmodified_read_count, 0);
+        assert_eq!(tallies.hp2.total_read_count, 0);
         assert_eq!(tallies.unphased.base_counts.get(&b'C'), Some(&1));
         assert_eq!(
             tallies.unphased.insertion_counts.get(b"GG" as &[u8]),
             Some(&1)
         );
         assert_eq!(tallies.unphased.methylated_read_count, 1);
+        assert_eq!(tallies.unphased.unmodified_read_count, 0);
+        assert_eq!(tallies.unphased.total_read_count, 1);
     }
 
     #[test]

@@ -164,14 +164,16 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
                 app.selected_phase_allele_tallies
                     .as_ref()
                     .map(phase_allele_tallies_label)
-                    .unwrap_or_else(|| "HP1[none m:0] HP2[none m:0] U[none m:0]".to_string())
+                    .unwrap_or_else(|| {
+                        "HP1[none;m0/u0/r0] HP2[none;m0/u0/r0] U[none;m0/u0/r0]".to_string()
+                    })
             } else {
                 app.selected_allele_tally
                     .as_ref()
                     .map(selected_allele_tally_label)
-                    .unwrap_or_else(|| "alleles:none meth:0".to_string())
+                    .unwrap_or_else(|| "alleles:none meth:0 unmod:0 reads:0".to_string())
             };
-            format!(" SELECTED {position}  {tally} ")
+            format!(" SEL {position}  {tally} ")
         });
     let metrics = format!(
         " {}  reads:{}  {}  scale:{:.1} bp/col  {}  {}  {}  {} ",
@@ -278,9 +280,15 @@ fn selected_position_label(contig: &str, selected_ref_pos: Option<u64>) -> Optio
 fn selected_allele_tally_label(tally: &PositionAlleleTally) -> String {
     let alleles = allele_tally_details_label(tally);
     if alleles.is_empty() {
-        format!("alleles:none meth:{}", tally.methylated_read_count)
+        format!(
+            "alleles:none meth:{} unmod:{} reads:{}",
+            tally.methylated_read_count, tally.unmodified_read_count, tally.total_read_count
+        )
     } else {
-        format!("alleles:{alleles} meth:{}", tally.methylated_read_count)
+        format!(
+            "alleles:{alleles} meth:{} unmod:{} reads:{}",
+            tally.methylated_read_count, tally.unmodified_read_count, tally.total_read_count
+        )
     }
 }
 
@@ -294,11 +302,17 @@ fn phase_allele_tallies_label(tallies: &PhasePositionAlleleTallies) -> String {
 }
 
 fn phase_allele_tally_label(tally: &PositionAlleleTally) -> String {
-    let alleles = allele_tally_details_label(tally);
+    let alleles = compact_allele_tally_details_label(tally);
     if alleles.is_empty() {
-        format!("none m:{}", tally.methylated_read_count)
+        format!(
+            "none;m{}/u{}/r{}",
+            tally.methylated_read_count, tally.unmodified_read_count, tally.total_read_count
+        )
     } else {
-        format!("{alleles} m:{}", tally.methylated_read_count)
+        format!(
+            "{alleles};m{}/u{}/r{}",
+            tally.methylated_read_count, tally.unmodified_read_count, tally.total_read_count
+        )
     }
 }
 
@@ -325,6 +339,31 @@ fn allele_tally_details_label(tally: &PositionAlleleTally) -> String {
     }
 
     alleles.join(" ")
+}
+
+fn compact_allele_tally_details_label(tally: &PositionAlleleTally) -> String {
+    let mut alleles = Vec::new();
+    for base in *b"ACGTN" {
+        if let Some(count) = tally.base_counts.get(&base) {
+            alleles.push(format!("{}{}", base as char, count));
+        }
+    }
+    for (&base, &count) in &tally.base_counts {
+        if !matches!(base, b'A' | b'C' | b'G' | b'T' | b'N') {
+            alleles.push(format!("{}{}", base as char, count));
+        }
+    }
+    for (sequence, count) in &tally.deletion_counts {
+        alleles.push(format!("-{}{}", String::from_utf8_lossy(sequence), count));
+    }
+    if tally.deletion_count > 0 {
+        alleles.push(format!("DEL{}", tally.deletion_count));
+    }
+    for (sequence, count) in &tally.insertion_counts {
+        alleles.push(format!("+{}{}", String::from_utf8_lossy(sequence), count));
+    }
+
+    alleles.join(",")
 }
 
 fn truncate_to_width(text: &str, width: usize) -> String {
@@ -1155,7 +1194,7 @@ mod tests {
     #[test]
     fn top_bar_prioritizes_selected_information_and_mapq() {
         let identity = " LOCUS  file:demo.sorted.bam  region:chrDemo:45-115 ";
-        let selected_info = " SELECTED chrDemo:60  alleles:C:2 T:2 +GGGG:1 ";
+        let selected_info = " SEL chrDemo:60  alleles:C:2 T:2 +GGGG:1 ";
         let metrics = " mapq:all  reads:7  phase:tracks  scale:0.7 bp/col ";
 
         let (identity, selected_info, metrics, status) = fit_top_bar(
@@ -1168,7 +1207,7 @@ mod tests {
         let selected_info = selected_info.expect("selection remains visible");
 
         assert!(identity.starts_with(" LOCUS"));
-        assert!(selected_info.contains("SELECTED chrDemo:60"));
+        assert!(selected_info.contains("SEL chrDemo:60"));
         assert!(selected_info.contains("+GGGG:1"));
         assert!(metrics.contains("mapq:all"));
         assert!(status.is_none());
@@ -1176,18 +1215,18 @@ mod tests {
     }
 
     #[test]
-    fn top_bar_keeps_all_compact_phase_tallies_at_demo_width() {
+    fn top_bar_keeps_all_phase_count_groups_at_demo_width() {
         let identity = " LOCUS  file:demo.sorted.bam  region:chrDemo:45-115 ";
-        let selected_info = " SELECTED chrDemo:60  HP1[A:3 m:2] HP2[-G:1 m:0] U[+GG:1 m:1] ";
+        let selected_info = " SEL chrDemo:60  HP1[m2/u1/r3] HP2[m0/u0/r0] U[m1/u3/r4] ";
         let metrics = " mapq:all  reads:7  phase:tracks  scale:0.7 bp/col ";
 
         let (_, selected_info, _, _) =
             fit_top_bar(identity, Some(selected_info), metrics, None, 110);
         let selected_info = selected_info.expect("selection remains visible");
 
-        assert!(selected_info.contains("HP1[A:3 m:2]"));
-        assert!(selected_info.contains("HP2[-G:1 m:0]"));
-        assert!(selected_info.contains("U[+GG:1 m:1]"));
+        assert!(selected_info.contains("HP1[m2/u1/r3]"));
+        assert!(selected_info.contains("HP2[m0/u0/r0]"));
+        assert!(selected_info.contains("U[m1/u3/r4]"));
     }
 
     #[test]
@@ -1455,15 +1494,17 @@ mod tests {
             deletion_count: 1,
             insertion_counts: BTreeMap::from([(b"GG".to_vec(), 1)]),
             methylated_read_count: 2,
+            unmodified_read_count: 3,
+            total_read_count: 5,
         };
 
         assert_eq!(
             selected_allele_tally_label(&tally),
-            "alleles:A:3 C:1 -ACT:2 DEL:1 +GG:1 meth:2"
+            "alleles:A:3 C:1 -ACT:2 DEL:1 +GG:1 meth:2 unmod:3 reads:5"
         );
         assert_eq!(
             selected_allele_tally_label(&PositionAlleleTally::default()),
-            "alleles:none meth:0"
+            "alleles:none meth:0 unmod:0 reads:0"
         );
     }
 
@@ -1473,6 +1514,8 @@ mod tests {
             hp1: PositionAlleleTally {
                 base_counts: BTreeMap::from([(b'A', 3)]),
                 methylated_read_count: 2,
+                unmodified_read_count: 1,
+                total_read_count: 3,
                 ..PositionAlleleTally::default()
             },
             hp2: PositionAlleleTally {
@@ -1482,13 +1525,15 @@ mod tests {
             unphased: PositionAlleleTally {
                 insertion_counts: BTreeMap::from([(b"GG".to_vec(), 1)]),
                 methylated_read_count: 1,
+                unmodified_read_count: 3,
+                total_read_count: 4,
                 ..PositionAlleleTally::default()
             },
         };
 
         assert_eq!(
             phase_allele_tallies_label(&tallies),
-            "HP1[A:3 m:2] HP2[-G:1 m:0] U[+GG:1 m:1]"
+            "HP1[A3;m2/u1/r3] HP2[-G1;m0/u0/r0] U[+GG1;m1/u3/r4]"
         );
     }
 
