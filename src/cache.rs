@@ -167,6 +167,7 @@ impl RenderRead {
         position: u64,
         reference: Option<&ReferenceSlice>,
         tally: &mut PositionAlleleTally,
+        unresolved_deletions: &mut BTreeMap<(u64, u64), usize>,
     ) {
         let mut read_pos = 0usize;
         let mut ref_pos = self.start;
@@ -219,7 +220,12 @@ impl RenderRead {
                                     .filter(|sequence| sequence.len() == n as usize)
                                     .cloned()
                             });
-                        tally.add_deletion(sequence);
+                        if let Some(sequence) = sequence {
+                            tally.add_deletion(Some(sequence));
+                        } else {
+                            tally.add_deletion(None);
+                            *unresolved_deletions.entry((ref_pos, n)).or_default() += 1;
+                        }
                     }
                     deletion_idx += 1;
                     ref_pos = end;
@@ -228,6 +234,38 @@ impl RenderRead {
                 CigarOp::Skip(n) => ref_pos += n,
             }
         }
+    }
+
+    /// Return the query base aligned to one reference position, if this read covers it.
+    fn base_at_reference_position(&self, position: u64) -> Option<u8> {
+        let mut read_pos = 0usize;
+        let mut ref_pos = self.start;
+
+        for &op in &self.cigar_ops {
+            match op {
+                CigarOp::SoftClip(n) | CigarOp::Insertion(n) => read_pos += n as usize,
+                CigarOp::Match(n) | CigarOp::Mismatch(n) => {
+                    let end = ref_pos.saturating_add(n);
+                    if (ref_pos..end).contains(&position) {
+                        return self
+                            .sequence
+                            .get(read_pos + (position - ref_pos) as usize)
+                            .copied();
+                    }
+                    read_pos += n as usize;
+                    ref_pos = end;
+                }
+                CigarOp::Deletion(n) | CigarOp::Skip(n) => {
+                    let end = ref_pos.saturating_add(n);
+                    if (ref_pos..end).contains(&position) {
+                        return None;
+                    }
+                    ref_pos = end;
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -360,10 +398,46 @@ impl RegionCache {
     /// should not change a position's allele tally.
     pub fn allele_tally_at(&self, position: u64, min_mapq: u8) -> PositionAlleleTally {
         let mut tally = PositionAlleleTally::default();
+        let mut unresolved_deletions = BTreeMap::new();
         for read in self.reads.iter().filter(|read| read.mapq >= min_mapq) {
-            read.tally_alleles_at(position, self.reference.as_ref(), &mut tally);
+            read.tally_alleles_at(
+                position,
+                self.reference.as_ref(),
+                &mut tally,
+                &mut unresolved_deletions,
+            );
+        }
+
+        for ((start, len), count) in unresolved_deletions {
+            let end = start.saturating_add(len);
+            let Some(sequence) = self.pileup_consensus_sequence(start, end, min_mapq) else {
+                continue;
+            };
+            tally.deletion_count = tally.deletion_count.saturating_sub(count);
+            for _ in 0..count {
+                tally.add_deletion(Some(sequence.clone()));
+            }
         }
         tally
+    }
+
+    /// Infer absent deleted reference bases from reads that align across the deletion span.
+    fn pileup_consensus_sequence(&self, start: u64, end: u64, min_mapq: u8) -> Option<Vec<u8>> {
+        (start..end)
+            .map(|position| {
+                let mut counts = BTreeMap::new();
+                for read in self.reads.iter().filter(|read| read.mapq >= min_mapq) {
+                    let Some(base) = read.base_at_reference_position(position) else {
+                        continue;
+                    };
+                    *counts.entry(base.to_ascii_uppercase()).or_insert(0usize) += 1;
+                }
+                counts
+                    .into_iter()
+                    .max_by_key(|(_, count)| *count)
+                    .map(|(base, _)| base)
+            })
+            .collect()
     }
 }
 
@@ -637,6 +711,45 @@ mod tests {
 
         assert_eq!(tally.deletion_counts.get(b"ATCG" as &[u8]), Some(&1));
         assert_eq!(tally.deletion_count, 0);
+    }
+
+    #[test]
+    fn allele_tally_uses_pileup_consensus_for_deleted_sequence_without_reference_or_md() {
+        let mut deleted = make_read("deleted", 100, 106);
+        deleted.cigar_ops = vec![CigarOp::Match(1), CigarOp::Deletion(4), CigarOp::Match(1)];
+        deleted.sequence = b"AC".to_vec();
+
+        let mut support_a = make_read("support-a", 100, 106);
+        support_a.sequence = b"AATCGC".to_vec();
+        let mut support_b = make_read("support-b", 100, 106);
+        support_b.sequence = b"AATCGC".to_vec();
+
+        let cache = RegionCache {
+            reads: vec![deleted, support_a, support_b],
+            ..RegionCache::default()
+        };
+
+        let tally = cache.allele_tally_at(101, 0);
+
+        assert_eq!(tally.deletion_counts.get(b"ATCG" as &[u8]), Some(&1));
+        assert_eq!(tally.deletion_count, 0);
+    }
+
+    #[test]
+    fn allele_tally_keeps_generic_deletion_when_no_sequence_source_is_available() {
+        let mut deleted = make_read("deleted", 100, 106);
+        deleted.cigar_ops = vec![CigarOp::Match(1), CigarOp::Deletion(4), CigarOp::Match(1)];
+        deleted.sequence = b"AC".to_vec();
+
+        let cache = RegionCache {
+            reads: vec![deleted],
+            ..RegionCache::default()
+        };
+
+        let tally = cache.allele_tally_at(101, 0);
+
+        assert!(tally.deletion_counts.is_empty());
+        assert_eq!(tally.deletion_count, 1);
     }
 
     #[test]

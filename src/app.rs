@@ -315,6 +315,7 @@ impl App {
     pub fn select_reference_position(&mut self, pos: u64) {
         if (self.view_start..self.view_end).contains(&pos) {
             self.selected_ref_pos = Some(pos);
+            self.activate_insertion_at_selected_position(pos);
             self.refresh_selected_allele_tally();
             self.status_msg = None;
         }
@@ -384,6 +385,22 @@ impl App {
         }
         self.selected_ref_pos = Some(next);
         self.mark_dirty(false);
+        self.activate_insertion_at_selected_position(next);
+    }
+
+    /// Make an insertion at the selected anchor the active shared expansion.
+    fn activate_insertion_at_selected_position(&mut self, position: u64) {
+        if !self.expand_insertions {
+            return;
+        }
+
+        let transform = self.base_view_transform();
+        if visible_insertion_gaps(&self.cache.reads, &self.cache.pileup_rows, &transform)
+            .iter()
+            .any(|gap| gap.anchor_ref_pos() == position)
+        {
+            self.selected_insertion_ref_pos = Some(position);
+        }
     }
 
     pub fn zoom_in(&mut self) {
@@ -816,6 +833,28 @@ mod tests {
         App::new(source, None, None, None, Theme::Dark, min_mapq).expect("create app")
     }
 
+    fn read_with_insertion(name: &str, matched_before_insertion: u64) -> crate::cache::RenderRead {
+        crate::cache::RenderRead {
+            name: name.to_string(),
+            start: 0,
+            end: 20,
+            strand: crate::cache::Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![
+                crate::cache::CigarOp::Match(matched_before_insertion),
+                crate::cache::CigarOp::Insertion(2),
+                crate::cache::CigarOp::Match(20 - matched_before_insertion),
+            ],
+            sequence: vec![b'A'; 22],
+            methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
+            phase: Default::default(),
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        }
+    }
+
     #[test]
     fn mapq_prompt_applies_without_refetching() {
         let mut app = demo_app(0);
@@ -918,6 +957,27 @@ mod tests {
     }
 
     #[test]
+    fn selected_base_panning_activates_the_insertion_at_its_anchor() {
+        let mut app = demo_app(0);
+        app.view_start = 0;
+        app.view_end = 20;
+        app.terminal_cols = 22;
+        app.expand_insertions = true;
+        app.selected_insertion_ref_pos = Some(2);
+        app.cache.reads = vec![
+            read_with_insertion("first-insertion", 3),
+            read_with_insertion("second-insertion", 10),
+        ];
+        app.cache.pileup_rows = vec![vec![0, 1]];
+        app.selected_ref_pos = Some(8);
+
+        app.pan(1);
+
+        assert_eq!(app.selected_ref_pos, Some(9));
+        assert_eq!(app.selected_insertion_ref_pos, Some(9));
+    }
+
+    #[test]
     fn large_pan_is_fixed_at_one_thousand_bp() {
         let mut app = demo_app(0);
         app.source.contigs[0].length = 10_000;
@@ -999,6 +1059,31 @@ mod tests {
                 .as_ref()
                 .map(|tally| &tally.base_counts),
             Some(&std::collections::BTreeMap::new())
+        );
+    }
+
+    #[test]
+    fn selected_demo_deletion_uses_read_consensus_without_a_reference() {
+        let mut app = demo_app(0);
+        app.terminal_cols = 6;
+        app.terminal_rows = 20;
+        app.jump_to_region(&Region::new("chrDemo", 61, 65))
+            .expect("set deletion region");
+        app.refresh().expect("load demo reads");
+
+        app.select_reference_position(62);
+
+        assert_eq!(
+            app.selected_allele_tally
+                .as_ref()
+                .and_then(|tally| tally.deletion_counts.get(b"GT" as &[u8])),
+            Some(&1)
+        );
+        assert_eq!(
+            app.selected_allele_tally
+                .as_ref()
+                .map(|tally| tally.deletion_count),
+            Some(0)
         );
     }
 }
