@@ -217,6 +217,8 @@ impl App {
         self.expand_insertions = !self.expand_insertions;
         if !self.expand_insertions {
             self.selected_insertion_ref_pos = None;
+        } else if let Some(position) = self.selected_ref_pos {
+            self.activate_insertion_at_selected_position(position);
         }
         self.status_msg = Some(if self.expand_insertions {
             "insertions expanded".to_string()
@@ -975,6 +977,30 @@ mod tests {
 
         assert_eq!(app.selected_ref_pos, Some(9));
         assert_eq!(app.selected_insertion_ref_pos, Some(9));
+    }
+
+    #[test]
+    fn enabling_insertion_expansion_activates_the_selected_anchor() {
+        let mut app = demo_app(0);
+        app.view_start = 0;
+        app.view_end = 20;
+        app.terminal_cols = 22;
+        app.cache.reads = vec![
+            read_with_insertion("first-insertion", 3),
+            read_with_insertion("second-insertion", 10),
+        ];
+        app.cache.pileup_rows = vec![vec![0, 1]];
+        app.selected_ref_pos = Some(9);
+
+        app.toggle_insertions();
+
+        assert!(app.expand_insertions);
+        assert_eq!(app.selected_insertion_ref_pos, Some(9));
+        assert_eq!(
+            app.selected_insertion_gap(&app.base_view_transform())
+                .map(|gap| gap.anchor_ref_pos()),
+            Some(9)
+        );
     }
 
     #[test]
