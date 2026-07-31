@@ -97,7 +97,7 @@ To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capt
 | `+` / `=` | Zoom in |
 | `-` | Zoom out |
 | Left click | Select a genomic position and highlight occupied read cells |
-| Shift+click | Select a read and show its alignment details |
+| Shift+click | Select a read and show multi-line alignment details |
 | Mouse wheel | Scroll the read rows under the pointer; chooses that phased section in phase view |
 | `Shift+↑` / `Shift+↓` | Scroll the active read track up / down |
 | `Ctrl+↑` / `Ctrl+↓` | Select the previous / next active phase track |

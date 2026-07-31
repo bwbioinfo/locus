@@ -322,17 +322,25 @@ impl App {
 
     pub fn select_reference_position(&mut self, pos: u64) {
         if (self.view_start..self.view_end).contains(&pos) {
+            let had_selected_read = self.selected_read_idx.is_some();
             self.selected_read_idx = None;
             self.selected_ref_pos = Some(pos);
             self.activate_insertion_at_selected_position(pos);
             self.refresh_selected_allele_tally();
+            if had_selected_read {
+                self.relayout();
+            }
             self.status_msg = None;
         }
     }
 
     /// Clear the selected reference position, its tallies, and any selected insertion anchor.
     pub fn clear_selected_position(&mut self) {
+        let had_selected_read = self.selected_read_idx.is_some();
         self.clear_selected_reference_position();
+        if had_selected_read {
+            self.relayout();
+        }
     }
 
     /// Select a cached read and clear any selected genomic position.
@@ -340,13 +348,16 @@ impl App {
         if self.cache.reads.get(read_idx).is_some() {
             self.clear_selected_reference_position();
             self.selected_read_idx = Some(read_idx);
+            self.relayout();
             self.status_msg = None;
         }
     }
 
     /// Clear only the selected read while preserving an independent base selection.
     pub fn clear_selected_read(&mut self) {
-        self.selected_read_idx = None;
+        if self.selected_read_idx.take().is_some() {
+            self.relayout();
+        }
     }
 
     pub fn selected_read(&self) -> Option<&crate::cache::RenderRead> {
@@ -483,11 +494,7 @@ impl App {
     /// Re-layout pileup and coverage from the already-loaded reads (no disk IO).
     pub fn relayout(&mut self) {
         let visible = self.current_region();
-        let max_rows = crate::ui::available_read_rows(
-            self.terminal_rows,
-            self.reference.is_some(),
-            self.gff.is_some(),
-        );
+        let max_rows = crate::ui::available_read_rows_for_app(self);
         let cols = self.view_cols();
         self.cache
             .layout_pileup(&visible, max_rows.max(1), self.min_mapq, self.show_phasing);
@@ -599,11 +606,7 @@ impl App {
     fn read_track_viewport_rows(&self, track: ReadTrack) -> usize {
         let track = self.normalized_read_track(track);
         match track {
-            ReadTrack::Combined => crate::ui::available_read_rows(
-                self.terminal_rows,
-                self.reference.is_some(),
-                self.gff.is_some(),
-            ),
+            ReadTrack::Combined => crate::ui::available_read_rows_for_app(self),
             ReadTrack::Hp1 => self
                 .cache
                 .phase_layout
@@ -736,15 +739,11 @@ impl App {
             e
         })?;
 
-        let max_pileup_rows = crate::ui::available_read_rows(
-            self.terminal_rows,
-            self.reference.is_some(),
-            self.gff.is_some(),
-        );
+        self.selected_read_idx = None;
+        let max_pileup_rows = crate::ui::available_read_rows_for_app(self);
         let view_cols = self.view_cols();
 
         self.cache.reads = reads;
-        self.selected_read_idx = None;
         self.cache.reference = if let Some(reference) = self.reference.as_ref() {
             reference.fetch(&padded)?
         } else {

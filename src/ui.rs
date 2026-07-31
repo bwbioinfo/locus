@@ -27,7 +27,7 @@ use crate::{
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let [top_bar, main, bottom_bar] = browser_layout(area);
+    let [top_bar, main, bottom_bar] = app_browser_layout(app, area);
 
     draw_top_bar(frame, app, top_bar);
     draw_main(frame, app, main);
@@ -51,17 +51,27 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
-fn browser_layout(area: Rect) -> [Rect; 3] {
+fn app_browser_layout(app: &App, area: Rect) -> [Rect; 3] {
+    browser_layout_with_top_bar_height(area, top_bar_height(app))
+}
+
+fn browser_layout_with_top_bar_height(area: Rect, top_bar_height: u16) -> [Rect; 3] {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(top_bar_height),
             Constraint::Min(5),
             Constraint::Length(1),
         ])
         .split(area);
 
     [chunks[0], chunks[1], chunks[2]]
+}
+
+const READ_DETAILS_ROWS: u16 = 2;
+
+fn top_bar_height(app: &App) -> u16 {
+    1 + app.selected_read().map_or(0, |_| READ_DETAILS_ROWS)
 }
 
 const RULER_HEIGHT: u16 = 2;
@@ -81,18 +91,26 @@ fn read_area_height(main_height: u16, has_reference: bool, has_features: bool) -
     main_height.saturating_sub(fixed_height)
 }
 
+#[cfg(test)]
 pub(crate) fn available_read_rows(
     terminal_rows: u16,
     has_reference: bool,
     has_features: bool,
 ) -> usize {
-    let [_, main, _] = browser_layout(Rect::new(0, 0, 0, terminal_rows));
+    let [_, main, _] = browser_layout_with_top_bar_height(Rect::new(0, 0, 0, terminal_rows), 1);
     read_area_height(main.height, has_reference, has_features) as usize
+}
+
+pub(crate) fn available_read_rows_for_app(app: &App) -> usize {
+    let [_, main, _] =
+        app_browser_layout(app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+    read_area_height(main.height, app.reference.is_some(), app.gff.is_some()) as usize
 }
 
 /// Return the genomic position under a terminal click in the main browser canvas.
 pub(crate) fn genomic_position_at(app: &App, column: u16, row: u16) -> Option<u64> {
-    let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+    let [_, main, _] =
+        app_browser_layout(app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
     if column < main.x
         || column >= main.x.saturating_add(main.width)
         || row < main.y
@@ -106,7 +124,8 @@ pub(crate) fn genomic_position_at(app: &App, column: u16, row: u16) -> Option<u6
 
 /// Return the read section under a terminal position for vertical navigation.
 pub(crate) fn read_track_at(app: &App, column: u16, row: u16) -> Option<ReadTrack> {
-    let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+    let [_, main, _] =
+        app_browser_layout(app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
     let reads_area = read_track_area(app, main);
     if !rect_contains(reads_area, column, row) {
         return None;
@@ -131,7 +150,8 @@ pub(crate) fn read_track_at(app: &App, column: u16, row: u16) -> Option<ReadTrac
 
 /// Return the rendered read under a terminal position, if the position lands on an occupied row.
 pub(crate) fn read_index_at(app: &App, column: u16, row: u16) -> Option<usize> {
-    let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+    let [_, main, _] =
+        app_browser_layout(app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
     let reads_area = read_track_area(app, main);
     if !rect_contains(reads_area, column, row) {
         return None;
@@ -237,10 +257,13 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     let phasing_mode = phasing_mode_label(app.show_phasing);
     let theme_mode = theme_mode_label(app.theme);
     let mapq_filter = mapq_filter_label(app.min_mapq);
-    let selected_info = app
+    let selected_read_details = app
         .selected_read()
-        .map(|read| format!(" READ {} ", selected_read_label(app.current_contig(), read)))
-        .or_else(|| {
+        .map(|read| selected_read_label(app.current_contig(), read));
+    let selected_info = selected_read_details
+        .as_ref()
+        .is_none()
+        .then(|| {
             selected_position_label(app.current_contig(), app.selected_ref_pos).map(|position| {
                 let tally = if app.show_phasing {
                     app.selected_phase_allele_tallies
@@ -257,7 +280,8 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
                 };
                 format!(" SEL {position}  {tally} ")
             })
-        });
+        })
+        .flatten();
     let metrics = format!(
         " {}  reads:{}  {}  scale:{:.1} bp/col  {}  {}  {}  {} ",
         mapq_filter,
@@ -315,8 +339,26 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
+    let mut lines = vec![Line::from(spans)];
+    if let Some(read_details) = selected_read_details {
+        lines.extend(
+            selected_read_detail_lines(&read_details, width)
+                .into_iter()
+                .map(|detail| {
+                    let padding = width.saturating_sub(detail.chars().count());
+                    Line::from(Span::styled(
+                        format!("{detail}{}", " ".repeat(padding)),
+                        Style::default()
+                            .fg(app.theme.selected_info_fg())
+                            .bg(app.theme.selected_info_bg())
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                }),
+        );
+    }
+
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(app.theme.top_bar_bg())),
+        Paragraph::new(lines).style(Style::default().bg(app.theme.top_bar_bg())),
         area,
     );
 }
@@ -349,7 +391,7 @@ fn selected_read_label(contig: &str, read: &RenderRead) -> String {
     };
 
     format!(
-        "{} {}:{}-{} {} MAPQ:{} CIGAR:{} phase:{}{}",
+        "READ {}  {}:{}-{}  strand:{}  MAPQ:{}\nCIGAR:{}  phase:{}{}",
         read.name,
         contig,
         read.start.saturating_add(1),
@@ -360,6 +402,36 @@ fn selected_read_label(contig: &str, read: &RenderRead) -> String {
         phase,
         flags,
     )
+}
+
+fn selected_read_detail_lines(details: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new(); READ_DETAILS_ROWS as usize];
+    }
+
+    let mut lines = details
+        .lines()
+        .flat_map(|line| {
+            let characters = line.chars().collect::<Vec<_>>();
+            characters
+                .chunks(width)
+                .map(|chunk| chunk.iter().collect::<String>())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let truncated = lines.len() > READ_DETAILS_ROWS as usize;
+    lines.truncate(READ_DETAILS_ROWS as usize);
+    if truncated {
+        let last = lines.last_mut().expect("two read-detail rows remain");
+        *last = format!(
+            "{}~",
+            last.chars()
+                .take(width.saturating_sub(1))
+                .collect::<String>()
+        );
+    }
+    lines.resize(READ_DETAILS_ROWS as usize, String::new());
+    lines
 }
 
 fn cigar_label(cigar_ops: &[CigarOp]) -> String {
@@ -1207,7 +1279,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         Line::from("  Ctrl+↑/↓   Select previous / next phased read track"),
         Line::from("  Mouse wheel Scroll read track under pointer"),
         Line::from("  Left click Select genomic position and highlight read bases"),
-        Line::from("  Shift+click Select read and show alignment details"),
+        Line::from("  Shift+click Select read and show multi-line alignment details"),
         Line::from("  Esc        Clear selected position"),
         Line::from("  b          Toggle fluorescent selection brackets"),
         Line::from("  i          Toggle expanded insertion sequence"),
@@ -1435,7 +1507,8 @@ mod tests {
             unphased_viewport_rows: 1,
         });
 
-        let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let [_, main, _] =
+            app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
         let reads_area = read_track_area(&app, main);
         let [hp1, hp2, unphased] = phase_track_areas(
             reads_area,
@@ -1465,7 +1538,8 @@ mod tests {
         app.cache.reads = vec![hp1_read, hp2_read];
         app.cache.pileup_rows = vec![vec![0], vec![1]];
 
-        let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let [_, main, _] =
+            app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
         let reads_area = read_track_area(&app, main);
         let column = main.x.saturating_add(
             genomic_transform(&app, main)
@@ -1682,8 +1756,61 @@ mod tests {
 
         assert_eq!(
             selected_read_label("chrDemo", &read),
-            "read-1 chrDemo:101-110 - MAPQ:42 CIGAR:4M2I1D phase:HP1/PS:50 flags:secondary,duplicate"
+            "READ read-1  chrDemo:101-110  strand:-  MAPQ:42\nCIGAR:4M2I1D  phase:HP1/PS:50 flags:secondary,duplicate"
         );
+    }
+
+    #[test]
+    fn selected_read_detail_lines_preserve_two_structured_rows() {
+        assert_eq!(
+            selected_read_detail_lines("READ read-1\nCIGAR:10M  phase:HP1", 40),
+            vec!["READ read-1", "CIGAR:10M  phase:HP1"]
+        );
+        assert_eq!(
+            selected_read_detail_lines("123456789\nCIGAR:10M", 8),
+            vec!["12345678", "9~"]
+        );
+    }
+
+    #[test]
+    fn selected_read_uses_multiline_top_bar_and_adjusts_read_capacity() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 80;
+        app.terminal_rows = 24;
+        app.cache.reads = vec![phase_read("read-1", 100, Some(50))];
+
+        assert_eq!(top_bar_height(&app), 1);
+        assert_eq!(available_read_rows_for_app(&app), 17);
+
+        app.select_read(0);
+
+        let [top, main, bottom] =
+            app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        assert_eq!(top, Rect::new(0, 0, 80, 3));
+        assert_eq!(main, Rect::new(0, 3, 80, 20));
+        assert_eq!(bottom, Rect::new(0, 23, 80, 1));
+        assert_eq!(available_read_rows_for_app(&app), 15);
+
+        let backend = TestBackend::new(app.terminal_cols, app.terminal_rows);
+        let mut terminal = Terminal::new(backend).expect("test backend is infallible");
+        terminal.draw(|frame| draw(frame, &app)).expect("draw app");
+        let details = (1..3)
+            .map(|row| {
+                (0..app.terminal_cols)
+                    .filter_map(|column| terminal.backend().buffer().cell((column, row)))
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(details[0].contains("READ read-1"));
+        assert!(details[1].contains("CIGAR:10M"));
+
+        app.clear_selected_read();
+        assert_eq!(top_bar_height(&app), 1);
+        assert_eq!(available_read_rows_for_app(&app), 17);
     }
 
     #[test]
@@ -1739,7 +1866,7 @@ mod tests {
 
     #[test]
     fn browser_layout_reserves_the_top_and_bottom_bars() {
-        let [top, main, bottom] = browser_layout(Rect::new(0, 0, 80, 24));
+        let [top, main, bottom] = browser_layout_with_top_bar_height(Rect::new(0, 0, 80, 24), 1);
 
         assert_eq!(top, Rect::new(0, 0, 80, 1));
         assert_eq!(main, Rect::new(0, 1, 80, 22));
@@ -1765,7 +1892,8 @@ mod tests {
         app.expand_insertions = true;
         app.cycle_insertion_expansion(true);
         let anchor = app.selected_insertion_ref_pos.expect("selected insertion");
-        let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let [_, main, _] =
+            app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
         let transform = genomic_transform(&app, main);
         let gap = app
             .selected_insertion_gap(&transform)
@@ -1797,7 +1925,8 @@ mod tests {
         app.refresh().expect("load demo reads");
         app.expand_insertions = true;
         app.cycle_insertion_expansion(true);
-        let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let [_, main, _] =
+            app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
         let base_transform =
             ViewTransform::new(app.view_start, app.view_end, main.width.saturating_sub(2));
         let gap = app
@@ -1856,7 +1985,8 @@ mod tests {
         app.show_selection_brackets = false;
         app.refresh().expect("load demo reads");
 
-        let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let [_, main, _] =
+            app_browser_layout(&app, Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
         let transform = genomic_transform(&app, main);
         for deleted_position in 62..64 {
             let column = transform
