@@ -29,9 +29,42 @@ pub enum Mode {
     Help,
 }
 
+/// A vertically scrollable read section.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReadTrack {
+    #[default]
+    Combined,
+    Hp1,
+    Hp2,
+    Unphased,
+}
+
+impl ReadTrack {
+    const ALL: [Self; 4] = [Self::Combined, Self::Hp1, Self::Hp2, Self::Unphased];
+
+    fn index(self) -> usize {
+        match self {
+            Self::Combined => 0,
+            Self::Hp1 => 1,
+            Self::Hp2 => 2,
+            Self::Unphased => 3,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Combined => "combined",
+            Self::Hp1 => "HP1",
+            Self::Hp2 => "HP2",
+            Self::Unphased => "unphased",
+        }
+    }
+}
+
 /// Zoom / bp-per-terminal-column.
 const MIN_BP_PER_COL: f64 = 1.0;
 const MAX_BP_PER_COL: f64 = 100_000.0;
+pub const LARGE_PAN_BP: i64 = 1_000;
 
 /// Application state.
 pub struct App {
@@ -66,6 +99,8 @@ pub struct App {
     pub show_selection_brackets: bool,
     pub show_methylation: bool,
     pub show_phasing: bool,
+    pub active_read_track: ReadTrack,
+    read_scroll_offsets: [usize; 4],
     pub theme: Theme,
     pub min_mapq: u8,
 
@@ -134,6 +169,8 @@ impl App {
             show_selection_brackets: true,
             show_methylation: false,
             show_phasing: false,
+            active_read_track: ReadTrack::Combined,
+            read_scroll_offsets: [0; 4],
             theme,
             min_mapq,
             should_quit: false,
@@ -199,6 +236,11 @@ impl App {
 
     pub fn toggle_phasing(&mut self) {
         self.show_phasing = !self.show_phasing;
+        self.active_read_track = if self.show_phasing {
+            ReadTrack::Hp1
+        } else {
+            ReadTrack::Combined
+        };
         self.relayout();
         self.status_msg = Some(if self.show_phasing {
             "phasing split into HP1 and HP2 tracks; unphased reads separated".to_string()
@@ -289,6 +331,23 @@ impl App {
     // ─── Navigation ───────────────────────────────────────────────────────────
 
     pub fn pan(&mut self, delta_bp: i64) {
+        if self.selected_ref_pos.is_some() {
+            self.move_selected_reference_position(delta_bp.signum());
+            return;
+        }
+        self.pan_view(delta_bp);
+    }
+
+    pub fn pan_large(&mut self, direction: i64) {
+        self.pan_view(direction.signum() * LARGE_PAN_BP);
+    }
+
+    fn pan_view(&mut self, delta_bp: i64) {
+        self.shift_view(delta_bp);
+        self.mark_dirty(true);
+    }
+
+    fn shift_view(&mut self, delta_bp: i64) {
         let len = self.current_contig_len();
         let span = self.view_span();
         if delta_bp > 0 {
@@ -299,7 +358,32 @@ impl App {
             self.view_start = self.view_start.saturating_sub(d);
         }
         self.view_end = (self.view_start + span).min(len);
-        self.mark_dirty();
+    }
+
+    fn move_selected_reference_position(&mut self, delta_bp: i64) {
+        let Some(selected) = self.selected_ref_pos else {
+            return;
+        };
+        let next = if delta_bp > 0 {
+            selected
+                .saturating_add(1)
+                .min(self.current_contig_len().saturating_sub(1))
+        } else if delta_bp < 0 {
+            selected.saturating_sub(1)
+        } else {
+            selected
+        };
+        if next == selected {
+            return;
+        }
+
+        if next < self.view_start {
+            self.shift_view(-1);
+        } else if next >= self.view_end {
+            self.shift_view(1);
+        }
+        self.selected_ref_pos = Some(next);
+        self.mark_dirty(false);
     }
 
     pub fn zoom_in(&mut self) {
@@ -309,7 +393,7 @@ impl App {
         self.view_end = center + half_span;
         self.bp_per_col = (self.view_span() as f64 / self.view_cols() as f64).max(MIN_BP_PER_COL);
         self.clamp_view();
-        self.mark_dirty();
+        self.mark_dirty(true);
     }
 
     pub fn zoom_out(&mut self) {
@@ -320,13 +404,15 @@ impl App {
         self.view_end = center + new_half / 2;
         self.bp_per_col = (self.view_span() as f64 / self.view_cols() as f64).max(MIN_BP_PER_COL);
         self.clamp_view();
-        self.mark_dirty();
+        self.mark_dirty(true);
     }
 
     /// If the new view is within the cached padded region, just re-layout without disk IO.
     /// Only set needs_fetch=true when the view has drifted outside the loaded window.
-    fn mark_dirty(&mut self) {
-        self.clear_selected_reference_position();
+    fn mark_dirty(&mut self, clear_selection: bool) {
+        if clear_selection {
+            self.clear_selected_reference_position();
+        }
         let within_cache = self.cache.loaded_region.as_ref().is_some_and(|loaded| {
             loaded.contig == self.current_contig()
                 && self.view_start >= loaded.start
@@ -352,7 +438,144 @@ impl App {
             .layout_pileup(&visible, max_rows.max(1), self.min_mapq, self.show_phasing);
         self.cache
             .compute_coverage(&visible, cols.max(1), self.min_mapq);
+        self.clamp_read_scrolls();
         self.refresh_selected_allele_tally();
+    }
+
+    pub fn read_track_scroll(&self, track: ReadTrack) -> usize {
+        self.read_scroll_offsets[track.index()]
+    }
+
+    pub fn scroll_read_track(&mut self, track: ReadTrack, delta_rows: i32) {
+        let track = self.normalized_read_track(track);
+        self.active_read_track = track;
+        let row_count = self.read_track_row_count(track);
+        let viewport_rows = self.read_track_viewport_rows(track).max(1);
+        let max_scroll = row_count.saturating_sub(viewport_rows);
+        let current_offset = self.read_scroll_offsets[track.index()];
+        let offset = if delta_rows >= 0 {
+            current_offset
+                .saturating_add(delta_rows as usize)
+                .min(max_scroll)
+        } else {
+            current_offset.saturating_sub(delta_rows.unsigned_abs() as usize)
+        };
+        self.read_scroll_offsets[track.index()] = offset;
+
+        if row_count > 0 {
+            let first = offset + 1;
+            let last = (offset + viewport_rows).min(row_count);
+            self.status_msg = Some(format!(
+                "{} read rows {first}-{last} of {row_count}",
+                track.name()
+            ));
+        }
+    }
+
+    pub fn scroll_active_read_track(&mut self, delta_rows: i32) {
+        self.scroll_read_track(self.active_read_track, delta_rows);
+    }
+
+    pub fn cycle_active_read_track(&mut self, forward: bool) {
+        let tracks = self.available_read_tracks();
+        let current = tracks
+            .iter()
+            .position(|&track| track == self.active_read_track)
+            .unwrap_or(0);
+        let next = if forward {
+            (current + 1) % tracks.len()
+        } else {
+            current.checked_sub(1).unwrap_or(tracks.len() - 1)
+        };
+        self.active_read_track = tracks[next];
+        self.status_msg = Some(format!(
+            "active read track: {}",
+            self.active_read_track.name()
+        ));
+    }
+
+    fn available_read_tracks(&self) -> Vec<ReadTrack> {
+        let Some(layout) = self
+            .cache
+            .phase_layout
+            .as_ref()
+            .filter(|_| self.show_phasing)
+        else {
+            return vec![ReadTrack::Combined];
+        };
+
+        let mut tracks = vec![ReadTrack::Hp1, ReadTrack::Hp2];
+        if layout.unphased_rows.is_some() {
+            tracks.push(ReadTrack::Unphased);
+        }
+        tracks
+    }
+
+    fn normalized_read_track(&self, track: ReadTrack) -> ReadTrack {
+        self.available_read_tracks()
+            .into_iter()
+            .find(|&available| available == track)
+            .unwrap_or(ReadTrack::Combined)
+    }
+
+    fn read_track_row_count(&self, track: ReadTrack) -> usize {
+        let track = self.normalized_read_track(track);
+        match track {
+            ReadTrack::Combined => self.cache.pileup_rows.len(),
+            ReadTrack::Hp1 => self
+                .cache
+                .phase_layout
+                .as_ref()
+                .map_or(0, |layout| layout.hp1_rows.len()),
+            ReadTrack::Hp2 => self
+                .cache
+                .phase_layout
+                .as_ref()
+                .map_or(0, |layout| layout.hp2_rows.len()),
+            ReadTrack::Unphased => self
+                .cache
+                .phase_layout
+                .as_ref()
+                .and_then(|layout| layout.unphased_rows.as_ref())
+                .map_or(0, std::ops::Range::len),
+        }
+    }
+
+    fn read_track_viewport_rows(&self, track: ReadTrack) -> usize {
+        let track = self.normalized_read_track(track);
+        match track {
+            ReadTrack::Combined => crate::ui::available_read_rows(
+                self.terminal_rows,
+                self.reference.is_some(),
+                self.gff.is_some(),
+            ),
+            ReadTrack::Hp1 => self
+                .cache
+                .phase_layout
+                .as_ref()
+                .map_or(0, |layout| layout.hp1_viewport_rows),
+            ReadTrack::Hp2 => self
+                .cache
+                .phase_layout
+                .as_ref()
+                .map_or(0, |layout| layout.hp2_viewport_rows),
+            ReadTrack::Unphased => self
+                .cache
+                .phase_layout
+                .as_ref()
+                .map_or(0, |layout| layout.unphased_viewport_rows),
+        }
+    }
+
+    fn clamp_read_scrolls(&mut self) {
+        for track in ReadTrack::ALL {
+            let max_scroll = self
+                .read_track_row_count(track)
+                .saturating_sub(self.read_track_viewport_rows(track).max(1));
+            self.read_scroll_offsets[track.index()] =
+                self.read_scroll_offsets[track.index()].min(max_scroll);
+        }
+        self.active_read_track = self.normalized_read_track(self.active_read_track);
     }
 
     pub fn jump_to_region(&mut self, region: &Region) -> Result<()> {
@@ -480,6 +703,7 @@ impl App {
         );
         self.cache
             .compute_coverage(&visible, view_cols.max(1), self.min_mapq);
+        self.clamp_read_scrolls();
         self.refresh_selected_allele_tally();
 
         self.needs_fetch = false;
@@ -666,10 +890,11 @@ mod tests {
     }
 
     #[test]
-    fn selecting_a_position_does_not_refetch_and_navigation_clears_it() {
+    fn panning_with_a_selection_moves_it_one_base_without_refetching() {
         let mut app = demo_app(0);
         app.needs_fetch = false;
         let selected = app.view_start + 10;
+        app.cache.loaded_region = Some(Region::new("chrDemo", 0, app.current_contig_len()));
 
         app.select_reference_position(selected);
 
@@ -680,10 +905,59 @@ mod tests {
         );
         assert!(!app.needs_fetch);
 
-        app.pan(1);
+        let start = app.view_start;
+        app.pan(20);
 
-        assert!(app.selected_ref_pos.is_none());
-        assert!(app.selected_allele_tally.is_none());
+        assert_eq!(app.selected_ref_pos, Some(selected + 1));
+        assert_eq!(app.view_start, start);
+        assert!(!app.needs_fetch);
+
+        app.pan(-20);
+
+        assert_eq!(app.selected_ref_pos, Some(selected));
+    }
+
+    #[test]
+    fn large_pan_is_fixed_at_one_thousand_bp() {
+        let mut app = demo_app(0);
+        app.source.contigs[0].length = 10_000;
+        app.view_start = 100;
+        app.view_end = 200;
+
+        app.pan_large(1);
+
+        assert_eq!(app.view_start, 1_100);
+        assert_eq!(app.view_end, 1_200);
+    }
+
+    #[test]
+    fn read_tracks_scroll_independently() {
+        let mut app = demo_app(0);
+        app.terminal_rows = 10;
+        app.cache.pileup_rows = vec![Vec::new(); 7];
+
+        app.scroll_read_track(ReadTrack::Combined, 1);
+
+        assert_eq!(app.active_read_track, ReadTrack::Combined);
+        assert_eq!(app.read_track_scroll(ReadTrack::Combined), 1);
+
+        app.show_phasing = true;
+        app.cache.phase_layout = Some(crate::cache::PhasePileupLayout {
+            hp1_rows: 0..4,
+            hp2_rows: 4..6,
+            hp1_viewport_rows: 2,
+            hp2_viewport_rows: 1,
+            ..crate::cache::PhasePileupLayout::default()
+        });
+
+        app.scroll_read_track(ReadTrack::Hp2, 1);
+
+        assert_eq!(app.active_read_track, ReadTrack::Hp2);
+        assert_eq!(app.read_track_scroll(ReadTrack::Hp2), 1);
+        assert_eq!(app.read_track_scroll(ReadTrack::Combined), 1);
+
+        app.cycle_active_read_track(false);
+        assert_eq!(app.active_read_track, ReadTrack::Hp1);
     }
 
     #[test]

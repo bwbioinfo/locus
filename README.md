@@ -90,13 +90,16 @@ To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capt
 | Key | Action |
 |-----|--------|
 | `q` | Quit |
-| `h` / `←` | Pan left (small step) |
-| `l` / `→` | Pan right (small step) |
-| `H` | Pan left (large step) |
-| `L` | Pan right (large step) |
+| `h` / `←` | Pan left (small step), or move the selected base left one bp |
+| `l` / `→` | Pan right (small step), or move the selected base right one bp |
+| `Shift+←` / `H` | Pan left 1,000 bp |
+| `Shift+→` / `L` | Pan right 1,000 bp |
 | `+` / `=` | Zoom in |
 | `-` | Zoom out |
 | Left click | Select a genomic position and highlight occupied read cells |
+| Mouse wheel | Scroll the read rows under the pointer; chooses that phased section in phase view |
+| `Shift+↑` / `Shift+↓` | Scroll the active read track up / down |
+| `Ctrl+↑` / `Ctrl+↓` | Select the previous / next active phase track |
 | `b` | Toggle fluorescent brackets around selected read bases |
 | `i` | Toggle expanded insertion sequence |
 | `m` | Toggle read methylation display |
@@ -126,7 +129,7 @@ To refresh the app-generated HTML/ANSI captures and PNG, run `examples/demo/capt
 │ >>>>>>>>>>>>>>>>>>>>>>>>>>                              │
 │ >>>>>>>>>>>>>>>>>>>X>>>>>>>>>>>>>>>>>>>>>>>>>           │
 └─────────────────────────────────────────────────────────┘
-│ q:quit  h/l:pan  H/L:big pan  +/-:zoom  g:goto  ?:help │  ← bottom bar
+│ q:quit  h/l:pan  Shift+←→:1kb  Shift+↑↓:scroll  ?:help │  ← bottom bar
 ```
 
 ## Read Rendering
@@ -155,12 +158,13 @@ The demo BAM includes forward and reverse-strand MM/ML calls so the `m` toggle v
 Position selection:
 - Left-click anywhere in the genomic canvas to select its reference coordinate. The top bar shows `pos:contig:position` using a 1-based position and its MAPQ-filtered allele tally (`A`, `C`, `G`, `T`, `N`, deleted reference alleles such as `-ACT` when a FASTA is loaded or an `MD` tag supplies them, and inserted sequences such as `+GGGG`). Substitutions are included in their observed base count.
 - Occupied read cells at that coordinate are reversed and underlined across all visible read tracks. When individual bases are visible, fluorescent-green brackets around occupied selected bases are enabled by default and can be toggled with `b`.
-- When an insertion is expanded, clicking any gap cell selects the preceding reference base, highlights that base and the inserted sequence, reports the insertion tally there, and displays the selected insertion with a fluorescent outer bracket pair (`[[sequence]]`). Selections clear when navigating to a different view or contig.
+- When an insertion is expanded, clicking any gap cell selects the preceding reference base, highlights that base and the inserted sequence, reports the insertion tally there, and displays the selected insertion with a fluorescent outer bracket pair (`[[sequence]]`). Small pan commands move an existing selection by one reference base; selections clear when coarse-panning, jumping, zooming, or changing contig.
 
 Phased-read display:
 - Press `p` to switch between the combined pileup and separate haplotype tracks parsed from integer `HP` and `PS` BAM tags. The separated display is off by default.
 - HP1 and HP2 reads are independently coordinate-packed into labeled cyan and magenta tracks against the same reference coordinates.
-- The tracks consume available view rows before reporting hidden reads, including capacity released when another phase section needs fewer rows.
+- Every packed row is retained. Each phase section receives a compact, independently scrollable viewport, including capacity released when another section needs fewer rows.
+- Mouse-wheel scrolling uses the section under the pointer. `Shift+↑`/`Shift+↓` scroll the active section, and `Ctrl+↑`/`Ctrl+↓` chooses it for keyboard-only use. The active section has a reversed header.
 - Each phased track labels the visible `PS` blocks and marks their observed starts with a same-color rail; a boundary underlines an aligned base rather than replacing it.
 - Untagged reads, malformed tags, and haplotypes other than HP1/HP2 remain visible in a smaller neutral `Unphased` section.
 - Both dark and light themes use separate readable palettes.

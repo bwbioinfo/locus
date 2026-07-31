@@ -244,9 +244,10 @@ pub struct PhasePileupLayout {
     pub hp1_rows: Range<usize>,
     pub hp2_rows: Range<usize>,
     pub unphased_rows: Option<Range<usize>>,
-    pub hp1_hidden: usize,
-    pub hp2_hidden: usize,
-    pub unphased_hidden: usize,
+    /// Rows visible at once in each independently scrollable section.
+    pub hp1_viewport_rows: usize,
+    pub hp2_viewport_rows: usize,
+    pub unphased_viewport_rows: usize,
 }
 
 /// Cached data for the currently visible region.
@@ -264,8 +265,6 @@ pub struct RegionCache {
     pub coverage: CoverageBins,
     /// Reference bases for the padded region, when a FASTA was supplied.
     pub reference: Option<ReferenceSlice>,
-    /// How many reads were hidden because pileup depth was exceeded.
-    pub hidden_reads: usize,
 }
 
 impl RegionCache {
@@ -277,10 +276,11 @@ impl RegionCache {
         self.phase_layout = None;
         self.coverage.clear();
         self.reference = None;
-        self.hidden_reads = 0;
     }
 
-    /// Rebuild pileup layout for the visible sub-region, limited to `max_height` rows.
+    /// Rebuild the complete pileup layout for the visible sub-region.
+    ///
+    /// `max_height` determines the viewport capacity; it never discards packed rows.
     pub fn layout_pileup(
         &mut self,
         visible: &Region,
@@ -301,8 +301,7 @@ impl RegionCache {
         if separate_phases {
             self.layout_phased_pileup(&visible_reads, max_height);
         } else {
-            self.pileup_rows = pack_reads(&visible_reads, &self.reads, max_height);
-            self.hidden_reads = hidden_read_count(&visible_reads, &self.pileup_rows);
+            self.pileup_rows = pack_reads(&visible_reads, &self.reads, usize::MAX);
             self.phase_layout = None;
         }
     }
@@ -323,21 +322,15 @@ impl RegionCache {
         let has_unphased = !unphased.is_empty();
         let header_rows = 2 + usize::from(has_unphased);
         let row_budget = max_height.saturating_sub(header_rows);
-        let mut hp1_rows = pack_reads(&hp1, &self.reads, row_budget);
-        let mut hp2_rows = pack_reads(&hp2, &self.reads, row_budget);
-        let mut unphased_rows = pack_reads(&unphased, &self.reads, row_budget);
-        let (hp1_limit, hp2_limit, unphased_limit) = reclaim_unused_phase_rows(
-            row_budget,
-            [hp1_rows.len(), hp2_rows.len(), unphased_rows.len()],
-            has_unphased,
-        );
-        hp1_rows.truncate(hp1_limit);
-        hp2_rows.truncate(hp2_limit);
-        unphased_rows.truncate(unphased_limit);
-
-        let hp1_hidden = hidden_read_count(&hp1, &hp1_rows);
-        let hp2_hidden = hidden_read_count(&hp2, &hp2_rows);
-        let unphased_hidden = hidden_read_count(&unphased, &unphased_rows);
+        let hp1_rows = pack_reads(&hp1, &self.reads, usize::MAX);
+        let hp2_rows = pack_reads(&hp2, &self.reads, usize::MAX);
+        let unphased_rows = pack_reads(&unphased, &self.reads, usize::MAX);
+        let (hp1_viewport_rows, hp2_viewport_rows, unphased_viewport_rows) =
+            reclaim_unused_phase_rows(
+                row_budget,
+                [hp1_rows.len(), hp2_rows.len(), unphased_rows.len()],
+                has_unphased,
+            );
 
         let hp1_end = hp1_rows.len();
         let hp2_end = hp1_end + hp2_rows.len();
@@ -346,14 +339,13 @@ impl RegionCache {
         self.pileup_rows = hp1_rows;
         self.pileup_rows.extend(hp2_rows);
         self.pileup_rows.extend(unphased_rows);
-        self.hidden_reads = hp1_hidden + hp2_hidden + unphased_hidden;
         self.phase_layout = Some(PhasePileupLayout {
             hp1_rows: 0..hp1_end,
             hp2_rows: hp1_end..hp2_end,
             unphased_rows: has_unphased.then_some(hp2_end..unphased_end),
-            hp1_hidden,
-            hp2_hidden,
-            unphased_hidden,
+            hp1_viewport_rows,
+            hp2_viewport_rows,
+            unphased_viewport_rows,
         });
     }
 
@@ -373,12 +365,6 @@ impl RegionCache {
         }
         tally
     }
-}
-
-fn hidden_read_count(indices: &[usize], rows: &[PileupRow]) -> usize {
-    indices
-        .len()
-        .saturating_sub(rows.iter().map(Vec::len).sum::<usize>())
 }
 
 fn phase_row_limits(total_rows: usize, has_unphased: bool) -> (usize, usize, usize) {
@@ -443,7 +429,7 @@ fn pack_reads(indices: &[usize], reads: &[RenderRead], max_rows: usize) -> Vec<P
             .unwrap_or(row_ends.len());
 
         if target_row >= max_rows {
-            // Skip — hidden reads counted by caller
+            // The caller requested a bounded packing layout.
             continue;
         }
 
@@ -574,7 +560,6 @@ mod tests {
         cache.compute_coverage(&visible, 10, 30);
 
         assert_eq!(cache.pileup_rows, vec![vec![1]]);
-        assert_eq!(cache.hidden_reads, 0);
         assert!(cache.coverage.iter().all(|&count| count == 1));
         assert_eq!(cache.reads.len(), 2);
 
@@ -583,7 +568,6 @@ mod tests {
         assert!(layout.hp1_rows.is_empty());
         assert_eq!(layout.hp2_rows, 0..1);
         assert_eq!(cache.pileup_rows, vec![vec![1]]);
-        assert_eq!(cache.hidden_reads, 0);
     }
 
     #[test]
@@ -684,11 +668,10 @@ mod tests {
         assert_eq!(cache.pileup_rows[2], vec![2]);
         assert_eq!(cache.pileup_rows[3], vec![3]);
         assert_eq!(cache.pileup_rows[4], vec![4, 5]);
-        assert_eq!(cache.hidden_reads, 0);
     }
 
     #[test]
-    fn phased_pileup_tracks_hidden_reads_per_section() {
+    fn phased_pileup_keeps_rows_beyond_each_section_viewport() {
         let visible = Region::new("chr1", 0, 100);
         let mut hp1_a = make_read("hp1-a", 0, 100);
         hp1_a.phase.haplotype = Some(1);
@@ -705,14 +688,16 @@ mod tests {
         cache.layout_pileup(&visible, 5, 0, true);
 
         let layout = cache.phase_layout.as_ref().expect("phase layout");
-        assert_eq!(layout.hp1_hidden, 1);
-        assert_eq!(layout.hp2_hidden, 0);
-        assert_eq!(layout.unphased_hidden, 1);
-        assert_eq!(cache.hidden_reads, 2);
+        assert_eq!(layout.hp1_rows, 0..2);
+        assert_eq!(layout.hp2_rows, 2..3);
+        assert_eq!(layout.unphased_rows, Some(3..4));
+        assert_eq!(layout.hp1_viewport_rows, 1);
+        assert_eq!(layout.hp2_viewport_rows, 1);
+        assert_eq!(layout.unphased_viewport_rows, 0);
     }
 
     #[test]
-    fn phased_pileup_reclaims_spare_rows_before_hiding_reads() {
+    fn phased_pileup_reclaims_spare_rows_for_viewports() {
         let visible = Region::new("chr1", 0, 100);
         let mut hp1_a = make_read("hp1-a", 0, 100);
         hp1_a.phase.haplotype = Some(1);
@@ -734,10 +719,23 @@ mod tests {
         assert_eq!(layout.hp1_rows, 0..3);
         assert_eq!(layout.hp2_rows, 3..4);
         assert_eq!(layout.unphased_rows, Some(4..5));
-        assert_eq!(layout.hp1_hidden, 0);
-        assert_eq!(layout.hp2_hidden, 0);
-        assert_eq!(layout.unphased_hidden, 0);
-        assert_eq!(cache.hidden_reads, 0);
+        assert_eq!(layout.hp1_viewport_rows, 3);
+        assert_eq!(layout.hp2_viewport_rows, 1);
+        assert_eq!(layout.unphased_viewport_rows, 1);
+    }
+
+    #[test]
+    fn standard_pileup_keeps_rows_beyond_the_viewport() {
+        let visible = Region::new("chr1", 0, 100);
+        let cache_reads = vec![make_read("first", 0, 100), make_read("second", 0, 100)];
+        let mut cache = RegionCache {
+            reads: cache_reads,
+            ..RegionCache::default()
+        };
+
+        cache.layout_pileup(&visible, 1, 0, false);
+
+        assert_eq!(cache.pileup_rows, vec![vec![0], vec![1]]);
     }
 
     #[test]

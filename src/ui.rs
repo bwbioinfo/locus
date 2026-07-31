@@ -18,7 +18,7 @@ use crate::render::{
     ruler::Ruler,
 };
 use crate::{
-    app::{App, Mode},
+    app::{App, Mode, ReadTrack},
     cache::{PhasePileupLayout, PileupRow, PositionAlleleTally, RenderRead},
 };
 
@@ -101,10 +101,41 @@ pub(crate) fn genomic_position_at(app: &App, column: u16, row: u16) -> Option<u6
     genomic_transform(app, main).col_to_bp(column.saturating_sub(main.x))
 }
 
+/// Return the read section under a terminal position for vertical navigation.
+pub(crate) fn read_track_at(app: &App, column: u16, row: u16) -> Option<ReadTrack> {
+    let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+    let reads_area = read_track_area(app, main);
+    if !rect_contains(reads_area, column, row) {
+        return None;
+    }
+
+    if !app.show_phasing {
+        return Some(ReadTrack::Combined);
+    }
+
+    let layout = app.cache.phase_layout.as_ref()?;
+    let [hp1, hp2, unphased] = phase_track_areas(reads_area, layout);
+    if rect_contains(hp1, column, row) {
+        Some(ReadTrack::Hp1)
+    } else if rect_contains(hp2, column, row) {
+        Some(ReadTrack::Hp2)
+    } else if rect_contains(unphased, column, row) {
+        Some(ReadTrack::Unphased)
+    } else {
+        None
+    }
+}
+
+fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
+}
+
 fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     let bp_per_col = app.view_span() as f64 / app.view_cols().max(1) as f64;
-    let read_count =
-        app.cache.pileup_rows.iter().map(Vec::len).sum::<usize>() + app.cache.hidden_reads;
+    let read_count = app.cache.pileup_rows.iter().map(Vec::len).sum::<usize>();
     let width = area.width as usize;
     let file_name = app
         .source
@@ -328,35 +359,12 @@ fn format_region_display(app: &App) -> String {
 
 fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     let transform = genomic_transform(app, area);
-
-    let ruler_h = RULER_HEIGHT;
+    let chunks = main_chunks(app, area);
     let reference_h = if app.reference.is_some() {
         REFERENCE_HEIGHT
     } else {
         0
     };
-    let features_h = if app.gff.is_some() {
-        FEATURES_HEIGHT
-    } else {
-        0
-    };
-    let coverage_h = coverage_height(area.height);
-    let reads_h = read_area_height(area.height, app.reference.is_some(), app.gff.is_some());
-
-    let mut constraints = vec![Constraint::Length(ruler_h)];
-    if reference_h > 0 {
-        constraints.push(Constraint::Length(reference_h));
-    }
-    if features_h > 0 {
-        constraints.push(Constraint::Length(features_h));
-    }
-    constraints.push(Constraint::Length(coverage_h));
-    constraints.push(Constraint::Min(reads_h));
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
 
     let mut chunk_idx = 0;
 
@@ -414,6 +422,32 @@ fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn main_chunks(app: &App, area: Rect) -> Vec<Rect> {
+    let mut constraints = vec![Constraint::Length(RULER_HEIGHT)];
+    if app.reference.is_some() {
+        constraints.push(Constraint::Length(REFERENCE_HEIGHT));
+    }
+    if app.gff.is_some() {
+        constraints.push(Constraint::Length(FEATURES_HEIGHT));
+    }
+    constraints.push(Constraint::Length(coverage_height(area.height)));
+    constraints.push(Constraint::Min(read_area_height(
+        area.height,
+        app.reference.is_some(),
+        app.gff.is_some(),
+    )));
+
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area)
+        .to_vec()
+}
+
+fn read_track_area(app: &App, area: Rect) -> Rect {
+    main_chunks(app, area).last().copied().unwrap_or_default()
+}
+
 fn genomic_transform(app: &App, area: Rect) -> ViewTransform {
     let base_transform =
         ViewTransform::new(app.view_start, app.view_end, area.width.saturating_sub(2));
@@ -436,21 +470,16 @@ fn genomic_transform(app: &App, area: Rect) -> ViewTransform {
 }
 
 fn draw_standard_pileup(frame: &mut Frame, app: &App, transform: ViewTransform, area: Rect) {
-    render_reads_track(frame, app, transform, &app.cache.pileup_rows, area);
-
-    if app.cache.hidden_reads > 0 {
-        let msg = format!(" +{} reads hidden ", app.cache.hidden_reads);
-        let notice_area = Rect {
-            x: area.x,
-            y: area.y + area.height.saturating_sub(1),
-            width: (msg.len() as u16).min(area.width),
-            height: 1,
-        };
-        frame.render_widget(
-            Paragraph::new(msg).style(Style::default().fg(app.theme.status_fg())),
-            notice_area,
-        );
-    }
+    let offset = app
+        .read_track_scroll(ReadTrack::Combined)
+        .min(app.cache.pileup_rows.len());
+    render_reads_track(
+        frame,
+        app,
+        transform,
+        &app.cache.pileup_rows[offset..],
+        area,
+    );
 }
 
 fn draw_phased_pileup(
@@ -467,10 +496,10 @@ fn draw_phased_pileup(
         transform,
         PhaseSection {
             area: areas[0],
+            track: ReadTrack::Hp1,
             label: "HP1",
             color: app.theme.phase_hp1_fg(),
             rows: &app.cache.pileup_rows[layout.hp1_rows.clone()],
-            hidden_reads: layout.hp1_hidden,
             show_phase_set_boundaries: true,
         },
     );
@@ -480,10 +509,10 @@ fn draw_phased_pileup(
         transform,
         PhaseSection {
             area: areas[1],
+            track: ReadTrack::Hp2,
             label: "HP2",
             color: app.theme.phase_hp2_fg(),
             rows: &app.cache.pileup_rows[layout.hp2_rows.clone()],
-            hidden_reads: layout.hp2_hidden,
             show_phase_set_boundaries: true,
         },
     );
@@ -495,10 +524,10 @@ fn draw_phased_pileup(
             transform,
             PhaseSection {
                 area: areas[2],
+                track: ReadTrack::Unphased,
                 label: "Unphased",
                 color: app.theme.phase_unphased_fg(),
                 rows: &app.cache.pileup_rows[unphased_rows.clone()],
-                hidden_reads: layout.unphased_hidden,
                 show_phase_set_boundaries: false,
             },
         );
@@ -507,10 +536,10 @@ fn draw_phased_pileup(
 
 struct PhaseSection<'a> {
     area: Rect,
+    track: ReadTrack,
     label: &'a str,
     color: Color,
     rows: &'a [PileupRow],
-    hidden_reads: usize,
     show_phase_set_boundaries: bool,
 }
 
@@ -522,10 +551,10 @@ fn draw_phase_section(
 ) {
     let PhaseSection {
         area,
+        track,
         label,
         color,
         rows,
-        hidden_reads,
         show_phase_set_boundaries,
     } = section;
 
@@ -538,16 +567,14 @@ fn draw_phase_section(
     } else {
         Vec::new()
     };
-    let read_count = rows.iter().map(Vec::len).sum::<usize>() + hidden_reads;
-    let header = phase_section_header(
-        label,
-        read_count,
-        hidden_reads,
-        &phase_sets,
-        area.width as usize,
-    );
+    let read_count = rows.iter().map(Vec::len).sum::<usize>();
+    let header = phase_section_header(label, read_count, &phase_sets, area.width as usize);
+    let mut header_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    if app.active_read_track == track {
+        header_style = header_style.add_modifier(Modifier::REVERSED);
+    }
     frame.render_widget(
-        Paragraph::new(header).style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Paragraph::new(header).style(header_style),
         Rect { height: 1, ..area },
     );
 
@@ -557,7 +584,7 @@ fn draw_phase_section(
         &phase_sets,
         color,
         area,
-        phase_section_prefix(label, read_count, hidden_reads, &phase_sets)
+        phase_section_prefix(label, read_count, &phase_sets)
             .chars()
             .count(),
     );
@@ -567,7 +594,8 @@ fn draw_phase_section(
         height: area.height.saturating_sub(1),
         ..area
     };
-    render_reads_track(frame, app, transform, rows, reads_area);
+    let offset = app.read_track_scroll(track).min(rows.len());
+    render_reads_track(frame, app, transform, &rows[offset..], reads_area);
     frame.render_widget(
         PhaseSetBoundaryOverlay {
             boundaries: &phase_sets,
@@ -677,34 +705,23 @@ fn render_phase_set_header_labels(
     }
 }
 
-fn phase_section_prefix(
-    label: &str,
-    read_count: usize,
-    hidden_reads: usize,
-    phase_sets: &[PhaseSetBoundary],
-) -> String {
+fn phase_section_prefix(label: &str, read_count: usize, phase_sets: &[PhaseSetBoundary]) -> String {
     let noun = if read_count == 1 { "read" } else { "reads" };
-    let hidden = if hidden_reads > 0 {
-        format!("  +{hidden_reads} hidden")
-    } else {
-        String::new()
-    };
     let phase_sets = match phase_sets {
         [] => String::new(),
         [first] => format!("  PS:{}", first.id),
         [first, remaining @ ..] => format!("  PS:{} +{}", first.id, remaining.len()),
     };
-    format!(" {label}  {read_count} {noun}{hidden}{phase_sets} ")
+    format!(" {label}  {read_count} {noun}{phase_sets} ")
 }
 
 fn phase_section_header(
     label: &str,
     read_count: usize,
-    hidden_reads: usize,
     phase_sets: &[PhaseSetBoundary],
     width: usize,
 ) -> String {
-    let prefix = phase_section_prefix(label, read_count, hidden_reads, phase_sets);
+    let prefix = phase_section_prefix(label, read_count, phase_sets);
     let divider = "─".repeat(width.saturating_sub(prefix.chars().count()));
     truncate_to_width(&format!("{prefix}{divider}"), width)
 }
@@ -743,11 +760,11 @@ fn render_reads_track(
 
 fn phase_track_areas(area: Rect, layout: &PhasePileupLayout) -> [Rect; 3] {
     let mut remaining_height = area.height;
-    let hp1_height = phase_section_height(&mut remaining_height, layout.hp1_rows.len(), true);
-    let hp2_height = phase_section_height(&mut remaining_height, layout.hp2_rows.len(), true);
+    let hp1_height = phase_section_height(&mut remaining_height, layout.hp1_viewport_rows, true);
+    let hp2_height = phase_section_height(&mut remaining_height, layout.hp2_viewport_rows, true);
     let unphased_height = phase_section_height(
         &mut remaining_height,
-        layout.unphased_rows.as_ref().map_or(0, |rows| rows.len()),
+        layout.unphased_viewport_rows,
         layout.unphased_rows.is_some(),
     );
 
@@ -784,9 +801,9 @@ fn draw_bottom_bar(frame: &mut Frame, app: &App, area: Rect) {
     let keys = match app.mode {
         Mode::Normal => {
             if app.gff.is_some() {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  b:brackets  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  Shift+←/→:1kb  Shift+↑/↓:scroll  Ctrl+↑/↓:track  +/-:zoom  i:insertions  b:brackets  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  f:find  n/N:cycle  c:contigs  s:screenshot  ?:help"
             } else {
-                " q:quit  ←/→:pan  +/-:zoom  i:insertions  b:brackets  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
+                " q:quit  ←/→:pan  Shift+←/→:1kb  Shift+↑/↓:scroll  Ctrl+↑/↓:track  +/-:zoom  i:insertions  b:brackets  m:methylation  p:phase tracks  Q:MAPQ  t:theme  Tab:next ins  g:goto  c:contigs  r:refresh  s:screenshot  ?:help"
             }
         }
         Mode::GoTo => " Enter:confirm  Esc:cancel",
@@ -967,12 +984,15 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Line::from(""),
         Line::from("  q          Quit"),
-        Line::from("  h / ←      Pan left (small)"),
-        Line::from("  l / →      Pan right (small)"),
-        Line::from("  H          Pan left (large)"),
-        Line::from("  L          Pan right (large)"),
+        Line::from("  h / ←      Pan left (or move selected base left one bp)"),
+        Line::from("  l / →      Pan right (or move selected base right one bp)"),
+        Line::from("  Shift+←/→  Pan 1,000 bp left / right"),
+        Line::from("  H / L      Pan 1,000 bp left / right"),
         Line::from("  ↑ / + / =  Zoom in"),
         Line::from("  ↓ / -      Zoom out"),
+        Line::from("  Shift+↑/↓  Scroll active read track"),
+        Line::from("  Ctrl+↑/↓   Select previous / next phased read track"),
+        Line::from("  Mouse wheel Scroll read track under pointer"),
         Line::from("  Left click Select genomic position and highlight read bases"),
         Line::from("  b          Toggle fluorescent selection brackets"),
         Line::from("  i          Toggle expanded insertion sequence"),
@@ -1004,6 +1024,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(
             "    Reference mismatches use base-colored bold backgrounds when --reference is loaded",
         ),
+        Line::from("    The reversed phase-track header is the active keyboard target"),
         Line::from(""),
         Line::from("  CIGAR:  > / <  match   base highlight  mismatch   I  ins   -  del   ~  skip"),
         Line::from(""),
@@ -1137,7 +1158,9 @@ mod tests {
             hp1_rows: 0..1,
             hp2_rows: 1..2,
             unphased_rows: Some(2..3),
-            ..PhasePileupLayout::default()
+            hp1_viewport_rows: 1,
+            hp2_viewport_rows: 1,
+            unphased_viewport_rows: 1,
         };
         let [hp1, hp2, unphased] = phase_track_areas(area, &layout);
 
@@ -1154,6 +1177,8 @@ mod tests {
         let layout = PhasePileupLayout {
             hp1_rows: 0..3,
             hp2_rows: 3..5,
+            hp1_viewport_rows: 3,
+            hp2_viewport_rows: 2,
             ..PhasePileupLayout::default()
         };
         let [hp1, hp2, unphased] = phase_track_areas(area, &layout);
@@ -1164,7 +1189,40 @@ mod tests {
     }
 
     #[test]
-    fn phase_section_height_reserves_a_header_for_hidden_rows() {
+    fn read_track_hit_testing_uses_the_phased_section_under_the_pointer() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 80;
+        app.terminal_rows = 24;
+        app.show_phasing = true;
+        app.cache.phase_layout = Some(PhasePileupLayout {
+            hp1_rows: 0..3,
+            hp2_rows: 3..6,
+            unphased_rows: Some(6..8),
+            hp1_viewport_rows: 2,
+            hp2_viewport_rows: 2,
+            unphased_viewport_rows: 1,
+        });
+
+        let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let reads_area = read_track_area(&app, main);
+        let [hp1, hp2, unphased] = phase_track_areas(
+            reads_area,
+            app.cache.phase_layout.as_ref().expect("phase layout"),
+        );
+
+        assert_eq!(read_track_at(&app, hp1.x, hp1.y), Some(ReadTrack::Hp1));
+        assert_eq!(read_track_at(&app, hp2.x, hp2.y), Some(ReadTrack::Hp2));
+        assert_eq!(
+            read_track_at(&app, unphased.x, unphased.y),
+            Some(ReadTrack::Unphased)
+        );
+        assert_eq!(read_track_at(&app, 20, 1), None);
+    }
+
+    #[test]
+    fn phase_section_height_reserves_a_header_for_empty_rows() {
         let mut remaining_height = 2;
 
         assert_eq!(phase_section_height(&mut remaining_height, 0, true), 1);
@@ -1277,10 +1335,20 @@ mod tests {
         assert_eq!(hp2, hp1 + 4);
         assert_eq!(unphased, hp2 + 2);
         assert!(lines[hp1].contains("PS:100"));
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((1, hp1 as u16))
+                .expect("active header cell")
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
     }
 
     #[test]
-    fn phase_section_header_reports_group_and_hidden_reads() {
+    fn phase_section_header_reports_group_and_phase_sets() {
         let phase_sets = [
             PhaseSetBoundary { id: 50, start: 50 },
             PhaseSetBoundary {
@@ -1288,11 +1356,11 @@ mod tests {
                 start: 100,
             },
         ];
-        let header = phase_section_header("HP1", 4, 2, &phase_sets, 40);
+        let header = phase_section_header("HP1", 4, &phase_sets, 40);
 
-        assert!(header.starts_with(" HP1  4 reads  +2 hidden  PS:50 +1 "));
+        assert!(header.starts_with(" HP1  4 reads  PS:50 +1 "));
         assert_eq!(header.chars().count(), 40);
-        assert!(phase_section_header("HP2", 1, 0, &[], 20).starts_with(" HP2  1 read "));
+        assert!(phase_section_header("HP2", 1, &[], 20).starts_with(" HP2  1 read "));
     }
 
     #[test]
