@@ -5,7 +5,7 @@ pub mod reference;
 pub mod ruler;
 
 /// Maximum base pairs per terminal column at which individual bases are rendered.
-pub const BASE_RENDER_THRESHOLD: f64 = 5.0;
+pub const BASE_RENDER_THRESHOLD: f64 = 1.0;
 
 /// Maps between genomic coordinates and terminal columns.
 #[derive(Clone, Copy)]
@@ -266,6 +266,19 @@ mod tests {
             let pos = t.col_to_bp(col).expect("visible position");
             assert_eq!(t.bp_to_col(pos), Some(col));
         }
+    }
+
+    #[test]
+    fn individual_base_columns_are_one_to_one_with_reference_positions() {
+        let individual_bases = ViewTransform::new(100, 105, 5);
+        let compressed_bases = ViewTransform::new(100, 106, 5);
+
+        assert_eq!(individual_bases.bp_per_col(), BASE_RENDER_THRESHOLD);
+        for position in 100..105 {
+            let column = individual_bases.bp_to_col(position).expect("base column");
+            assert_eq!(individual_bases.col_to_bp(column), Some(position));
+        }
+        assert!(compressed_bases.bp_per_col() > BASE_RENDER_THRESHOLD);
     }
 
     #[test]

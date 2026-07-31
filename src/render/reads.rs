@@ -1177,8 +1177,8 @@ mod tests {
         };
         let reads = vec![read];
         let rows = vec![vec![0]];
-        let base_visible = ViewTransform::new(10, 35, 5);
-        let too_wide = ViewTransform::new(10, 36, 5);
+        let base_visible = ViewTransform::new(10, 15, 5);
+        let too_wide = ViewTransform::new(10, 16, 5);
 
         assert_eq!(base_visible.bp_per_col(), BASE_RENDER_THRESHOLD);
         assert_eq!(

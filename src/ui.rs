@@ -1430,20 +1430,59 @@ mod tests {
         let source = BamSource::open(path).expect("open demo BAM");
         let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
         app.view_start = 0;
-        app.selected_ref_pos = Some(10);
+        app.selected_ref_pos = Some(2);
 
-        app.view_end = 25;
+        app.view_end = 5;
         let base_visible = genomic_transform(&app, Rect::new(0, 0, 7, 1));
         assert_eq!(base_visible.bp_per_col(), BASE_RENDER_THRESHOLD);
-        assert_eq!(base_visible.selection_bracket, Some(10));
+        assert_eq!(base_visible.selection_bracket, Some(2));
 
-        app.view_end = 26;
+        app.view_end = 6;
         let too_wide = genomic_transform(&app, Rect::new(0, 0, 7, 1));
         assert_eq!(too_wide.selection_bracket, None);
 
-        app.view_end = 25;
+        app.view_end = 5;
         app.toggle_selection_brackets();
         let disabled = genomic_transform(&app, Rect::new(0, 0, 7, 1));
         assert_eq!(disabled.selection_bracket, None);
+    }
+
+    #[test]
+    fn clicked_deletion_columns_select_the_deleted_reference_bases() {
+        let demo_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo");
+        let source = BamSource::open(demo_dir.join("demo.sorted.bam")).expect("open demo BAM");
+        let reference = ReferenceStore::load(demo_dir.join("demo.fa")).expect("open demo FASTA");
+        let mut app = App::new(
+            source,
+            None,
+            Some(reference),
+            Some(Region::new("chrDemo", 61, 65)),
+            Theme::Dark,
+            0,
+        )
+        .expect("create app");
+        app.terminal_cols = 6;
+        app.terminal_rows = 20;
+        app.show_selection_brackets = false;
+        app.refresh().expect("load demo reads");
+
+        let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let transform = genomic_transform(&app, main);
+        for deleted_position in 62..64 {
+            let column = transform
+                .bp_to_col(deleted_position)
+                .expect("deletion column");
+            let selected_position = genomic_position_at(&app, main.x + column, main.y)
+                .expect("clickable deletion column");
+            assert_eq!(selected_position, deleted_position);
+
+            app.select_reference_position(selected_position);
+            assert_eq!(
+                app.selected_allele_tally
+                    .as_ref()
+                    .and_then(|tally| tally.deletion_counts.get(b"GT" as &[u8])),
+                Some(&1)
+            );
+        }
     }
 }
