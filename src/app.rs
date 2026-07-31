@@ -94,6 +94,8 @@ pub struct App {
     pub selected_insertion_ref_pos: Option<u64>,
     /// 0-based genomic position selected with the mouse.
     pub selected_ref_pos: Option<u64>,
+    /// Index of the read selected with Shift+click in the current cache.
+    pub selected_read_idx: Option<usize>,
     /// Alleles observed at the selected reference position under the active MAPQ filter.
     pub selected_allele_tally: Option<PositionAlleleTally>,
     /// Phase-separated alleles observed at the selected reference position.
@@ -167,6 +169,7 @@ impl App {
             expand_insertions: false,
             selected_insertion_ref_pos: None,
             selected_ref_pos: None,
+            selected_read_idx: None,
             selected_allele_tally: None,
             selected_phase_allele_tallies: None,
             show_selection_brackets: true,
@@ -319,6 +322,7 @@ impl App {
 
     pub fn select_reference_position(&mut self, pos: u64) {
         if (self.view_start..self.view_end).contains(&pos) {
+            self.selected_read_idx = None;
             self.selected_ref_pos = Some(pos);
             self.activate_insertion_at_selected_position(pos);
             self.refresh_selected_allele_tally();
@@ -329,6 +333,25 @@ impl App {
     /// Clear the selected reference position, its tallies, and any selected insertion anchor.
     pub fn clear_selected_position(&mut self) {
         self.clear_selected_reference_position();
+    }
+
+    /// Select a cached read and clear any selected genomic position.
+    pub fn select_read(&mut self, read_idx: usize) {
+        if self.cache.reads.get(read_idx).is_some() {
+            self.clear_selected_reference_position();
+            self.selected_read_idx = Some(read_idx);
+            self.status_msg = None;
+        }
+    }
+
+    /// Clear only the selected read while preserving an independent base selection.
+    pub fn clear_selected_read(&mut self) {
+        self.selected_read_idx = None;
+    }
+
+    pub fn selected_read(&self) -> Option<&crate::cache::RenderRead> {
+        self.selected_read_idx
+            .and_then(|read_idx| self.cache.reads.get(read_idx))
     }
 
     fn base_view_transform(&self) -> ViewTransform {
@@ -721,6 +744,7 @@ impl App {
         let view_cols = self.view_cols();
 
         self.cache.reads = reads;
+        self.selected_read_idx = None;
         self.cache.reference = if let Some(reference) = self.reference.as_ref() {
             reference.fetch(&padded)?
         } else {
@@ -826,6 +850,7 @@ impl App {
     fn clear_selected_reference_position(&mut self) {
         self.selected_ref_pos = None;
         self.selected_insertion_ref_pos = None;
+        self.selected_read_idx = None;
         self.selected_allele_tally = None;
         self.selected_phase_allele_tallies = None;
     }

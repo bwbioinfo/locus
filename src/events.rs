@@ -44,7 +44,13 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(position) = ui::genomic_position_at(app, mouse.column, mouse.row) {
+            if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                if let Some(read_idx) = ui::read_index_at(app, mouse.column, mouse.row) {
+                    app.select_read(read_idx);
+                } else {
+                    app.clear_selected_read();
+                }
+            } else if let Some(position) = ui::genomic_position_at(app, mouse.column, mouse.row) {
                 app.select_reference_position(position);
             }
         }
@@ -266,7 +272,11 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::{bam::BamSource, theme::Theme};
+    use crate::{
+        bam::BamSource,
+        cache::{CigarOp, ReadPhase, RenderRead, Strand},
+        theme::Theme,
+    };
 
     #[test]
     fn p_key_toggles_phasing_without_fetching() {
@@ -311,6 +321,7 @@ mod tests {
         app.show_phasing = true;
         app.select_reference_position(selected);
         app.selected_insertion_ref_pos = Some(selected);
+        app.selected_read_idx = Some(0);
         app.needs_fetch = false;
 
         handle_normal(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
@@ -320,6 +331,7 @@ mod tests {
         assert!(app.selected_insertion_ref_pos.is_none());
         assert!(app.selected_allele_tally.is_none());
         assert!(app.selected_phase_allele_tallies.is_none());
+        assert!(app.selected_read().is_none());
         assert!(!app.needs_fetch);
     }
 
@@ -362,6 +374,65 @@ mod tests {
 
         assert_eq!(app.selected_ref_pos, Some(expected));
         assert!(!app.needs_fetch);
+    }
+
+    #[test]
+    fn shift_click_selects_the_read_under_the_pointer() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 80;
+        app.terminal_rows = 24;
+        app.needs_fetch = false;
+
+        let position = ui::genomic_position_at(&app, 20, 6).expect("canvas position");
+        app.cache.reads = vec![RenderRead {
+            name: "shift-click-read".to_string(),
+            start: position,
+            end: position + 1,
+            strand: Strand::Forward,
+            mapq: 60,
+            cigar_ops: vec![CigarOp::Match(1)],
+            sequence: vec![b'A'],
+            methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
+            phase: ReadPhase::default(),
+            is_secondary: false,
+            is_supplementary: false,
+            is_duplicate: false,
+        }];
+        app.cache.pileup_rows = vec![vec![0]];
+        app.select_reference_position(position);
+
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 20,
+                row: 6,
+                modifiers: KeyModifiers::SHIFT,
+            },
+        );
+
+        assert_eq!(
+            app.selected_read().map(|read| read.name.as_str()),
+            Some("shift-click-read")
+        );
+        assert!(app.selected_ref_pos.is_none());
+        assert!(!app.needs_fetch);
+
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 20,
+                row: 6,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+
+        assert_eq!(app.selected_ref_pos, Some(position));
+        assert!(app.selected_read().is_none());
     }
 
     #[test]

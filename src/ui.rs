@@ -20,7 +20,8 @@ use crate::render::{
 use crate::{
     app::{App, Mode, ReadTrack},
     cache::{
-        PhasePileupLayout, PhasePositionAlleleTallies, PileupRow, PositionAlleleTally, RenderRead,
+        CigarOp, PhasePileupLayout, PhasePositionAlleleTallies, PileupRow, PositionAlleleTally,
+        RenderRead, Strand,
     },
 };
 
@@ -128,6 +129,84 @@ pub(crate) fn read_track_at(app: &App, column: u16, row: u16) -> Option<ReadTrac
     }
 }
 
+/// Return the rendered read under a terminal position, if the position lands on an occupied row.
+pub(crate) fn read_index_at(app: &App, column: u16, row: u16) -> Option<usize> {
+    let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+    let reads_area = read_track_area(app, main);
+    if !rect_contains(reads_area, column, row) {
+        return None;
+    }
+    let position = genomic_transform(app, main).col_to_bp(column.saturating_sub(main.x))?;
+
+    if !app.show_phasing {
+        let row_idx = usize::from(row.saturating_sub(reads_area.y))
+            + app.read_track_scroll(ReadTrack::Combined);
+        return read_index_in_row(&app.cache.reads, &app.cache.pileup_rows, row_idx, position);
+    }
+
+    let layout = app.cache.phase_layout.as_ref()?;
+    let [hp1, hp2, unphased] = phase_track_areas(reads_area, layout);
+    read_index_in_phase_section(
+        app,
+        &app.cache.pileup_rows[layout.hp1_rows.clone()],
+        ReadTrack::Hp1,
+        hp1,
+        row,
+        position,
+    )
+    .or_else(|| {
+        read_index_in_phase_section(
+            app,
+            &app.cache.pileup_rows[layout.hp2_rows.clone()],
+            ReadTrack::Hp2,
+            hp2,
+            row,
+            position,
+        )
+    })
+    .or_else(|| {
+        layout.unphased_rows.as_ref().and_then(|rows| {
+            read_index_in_phase_section(
+                app,
+                &app.cache.pileup_rows[rows.clone()],
+                ReadTrack::Unphased,
+                unphased,
+                row,
+                position,
+            )
+        })
+    })
+}
+
+fn read_index_in_phase_section(
+    app: &App,
+    rows: &[PileupRow],
+    track: ReadTrack,
+    area: Rect,
+    row: u16,
+    position: u64,
+) -> Option<usize> {
+    let reads_start = area.y.saturating_add(1);
+    if row < reads_start || row >= area.y.saturating_add(area.height) {
+        return None;
+    }
+    let row_idx = usize::from(row.saturating_sub(reads_start)) + app.read_track_scroll(track);
+    read_index_in_row(&app.cache.reads, rows, row_idx, position)
+}
+
+fn read_index_in_row(
+    reads: &[RenderRead],
+    rows: &[PileupRow],
+    row_idx: usize,
+    position: u64,
+) -> Option<usize> {
+    rows.get(row_idx)?.iter().copied().find(|&read_idx| {
+        reads
+            .get(read_idx)
+            .is_some_and(|read| (read.start..read.end).contains(&position))
+    })
+}
+
 fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x
         && column < area.x.saturating_add(area.width)
@@ -158,22 +237,26 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     let phasing_mode = phasing_mode_label(app.show_phasing);
     let theme_mode = theme_mode_label(app.theme);
     let mapq_filter = mapq_filter_label(app.min_mapq);
-    let selected_info =
-        selected_position_label(app.current_contig(), app.selected_ref_pos).map(|position| {
-            let tally = if app.show_phasing {
-                app.selected_phase_allele_tallies
-                    .as_ref()
-                    .map(phase_allele_tallies_label)
-                    .unwrap_or_else(|| {
-                        "HP1[none;m0/u0/r0] HP2[none;m0/u0/r0] U[none;m0/u0/r0]".to_string()
-                    })
-            } else {
-                app.selected_allele_tally
-                    .as_ref()
-                    .map(selected_allele_tally_label)
-                    .unwrap_or_else(|| "alleles:none meth:0 unmod:0 reads:0".to_string())
-            };
-            format!(" SEL {position}  {tally} ")
+    let selected_info = app
+        .selected_read()
+        .map(|read| format!(" READ {} ", selected_read_label(app.current_contig(), read)))
+        .or_else(|| {
+            selected_position_label(app.current_contig(), app.selected_ref_pos).map(|position| {
+                let tally = if app.show_phasing {
+                    app.selected_phase_allele_tallies
+                        .as_ref()
+                        .map(phase_allele_tallies_label)
+                        .unwrap_or_else(|| {
+                            "HP1[none;m0/u0/r0] HP2[none;m0/u0/r0] U[none;m0/u0/r0]".to_string()
+                        })
+                } else {
+                    app.selected_allele_tally
+                        .as_ref()
+                        .map(selected_allele_tally_label)
+                        .unwrap_or_else(|| "alleles:none meth:0 unmod:0 reads:0".to_string())
+                };
+                format!(" SEL {position}  {tally} ")
+            })
         });
     let metrics = format!(
         " {}  reads:{}  {}  scale:{:.1} bp/col  {}  {}  {}  {} ",
@@ -236,6 +319,61 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(spans)).style(Style::default().bg(app.theme.top_bar_bg())),
         area,
     );
+}
+
+fn selected_read_label(contig: &str, read: &RenderRead) -> String {
+    let strand = match read.strand {
+        Strand::Forward => '+',
+        Strand::Reverse => '-',
+    };
+    let phase = match (read.phase.haplotype, read.phase.phase_set) {
+        (Some(haplotype), Some(phase_set)) => format!("HP{haplotype}/PS:{phase_set}"),
+        (Some(haplotype), None) => format!("HP{haplotype}"),
+        (None, Some(phase_set)) => format!("PS:{phase_set}"),
+        (None, None) => "unphased".to_string(),
+    };
+    let mut flags = Vec::new();
+    if read.is_secondary {
+        flags.push("secondary");
+    }
+    if read.is_supplementary {
+        flags.push("supplementary");
+    }
+    if read.is_duplicate {
+        flags.push("duplicate");
+    }
+    let flags = if flags.is_empty() {
+        String::new()
+    } else {
+        format!(" flags:{}", flags.join(","))
+    };
+
+    format!(
+        "{} {}:{}-{} {} MAPQ:{} CIGAR:{} phase:{}{}",
+        read.name,
+        contig,
+        read.start.saturating_add(1),
+        read.end,
+        strand,
+        read.mapq,
+        cigar_label(&read.cigar_ops),
+        phase,
+        flags,
+    )
+}
+
+fn cigar_label(cigar_ops: &[CigarOp]) -> String {
+    cigar_ops
+        .iter()
+        .map(|op| match op {
+            CigarOp::Match(length) => format!("{length}M"),
+            CigarOp::Mismatch(length) => format!("{length}X"),
+            CigarOp::Insertion(length) => format!("{length}I"),
+            CigarOp::Deletion(length) => format!("{length}D"),
+            CigarOp::Skip(length) => format!("{length}N"),
+            CigarOp::SoftClip(length) => format!("{length}S"),
+        })
+        .collect::<String>()
 }
 
 fn insertion_mode_label(expanded: bool) -> &'static str {
@@ -1069,6 +1207,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         Line::from("  Ctrl+↑/↓   Select previous / next phased read track"),
         Line::from("  Mouse wheel Scroll read track under pointer"),
         Line::from("  Left click Select genomic position and highlight read bases"),
+        Line::from("  Shift+click Select read and show alignment details"),
         Line::from("  Esc        Clear selected position"),
         Line::from("  b          Toggle fluorescent selection brackets"),
         Line::from("  i          Toggle expanded insertion sequence"),
@@ -1313,6 +1452,47 @@ mod tests {
     }
 
     #[test]
+    fn read_selection_hit_testing_uses_the_visible_pileup_row() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/demo/demo.sorted.bam");
+        let source = BamSource::open(path).expect("open demo BAM");
+        let mut app = App::new(source, None, None, None, Theme::Dark, 0).expect("create app");
+        app.terminal_cols = 80;
+        app.terminal_rows = 24;
+        let position = app.view_start;
+        let hp1_read = phase_read("hp1", position, Some(50));
+        let mut hp2_read = phase_read("hp2", position, Some(50));
+        hp2_read.phase.haplotype = Some(2);
+        app.cache.reads = vec![hp1_read, hp2_read];
+        app.cache.pileup_rows = vec![vec![0], vec![1]];
+
+        let [_, main, _] = browser_layout(Rect::new(0, 0, app.terminal_cols, app.terminal_rows));
+        let reads_area = read_track_area(&app, main);
+        let column = main.x.saturating_add(
+            genomic_transform(&app, main)
+                .bp_to_col(position)
+                .expect("visible position"),
+        );
+        assert_eq!(read_index_at(&app, column, reads_area.y), Some(0));
+
+        app.show_phasing = true;
+        app.cache.phase_layout = Some(PhasePileupLayout {
+            hp1_rows: 0..1,
+            hp2_rows: 1..2,
+            hp1_viewport_rows: 1,
+            hp2_viewport_rows: 1,
+            ..PhasePileupLayout::default()
+        });
+        let [hp1, hp2, _] = phase_track_areas(
+            reads_area,
+            app.cache.phase_layout.as_ref().expect("phase layout"),
+        );
+
+        assert_eq!(read_index_at(&app, column, hp1.y), None);
+        assert_eq!(read_index_at(&app, column, hp1.y + 1), Some(0));
+        assert_eq!(read_index_at(&app, column, hp2.y + 1), Some(1));
+    }
+
+    #[test]
     fn phase_section_height_reserves_a_header_for_empty_rows() {
         let mut remaining_height = 2;
 
@@ -1485,6 +1665,25 @@ mod tests {
             Some("chrDemo:65".to_string())
         );
         assert_eq!(selected_position_label("chrDemo", None), None);
+    }
+
+    #[test]
+    fn selected_read_label_reports_alignment_metadata() {
+        let mut read = phase_read("read-1", 100, Some(50));
+        read.strand = Strand::Reverse;
+        read.mapq = 42;
+        read.cigar_ops = vec![
+            CigarOp::Match(4),
+            CigarOp::Insertion(2),
+            CigarOp::Deletion(1),
+        ];
+        read.is_secondary = true;
+        read.is_duplicate = true;
+
+        assert_eq!(
+            selected_read_label("chrDemo", &read),
+            "read-1 chrDemo:101-110 - MAPQ:42 CIGAR:4M2I1D phase:HP1/PS:50 flags:secondary,duplicate"
+        );
     }
 
     #[test]
