@@ -19,7 +19,9 @@ use crate::render::{
 };
 use crate::{
     app::{App, Mode, ReadTrack},
-    cache::{PhasePileupLayout, PileupRow, PositionAlleleTally, RenderRead},
+    cache::{
+        PhasePileupLayout, PhasePositionAlleleTallies, PileupRow, PositionAlleleTally, RenderRead,
+    },
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -158,11 +160,17 @@ fn draw_top_bar(frame: &mut Frame, app: &App, area: Rect) {
     let mapq_filter = mapq_filter_label(app.min_mapq);
     let selected_info =
         selected_position_label(app.current_contig(), app.selected_ref_pos).map(|position| {
-            let tally = app
-                .selected_allele_tally
-                .as_ref()
-                .map(selected_allele_tally_label)
-                .unwrap_or_else(|| "alleles:none".to_string());
+            let tally = if app.show_phasing {
+                app.selected_phase_allele_tallies
+                    .as_ref()
+                    .map(phase_allele_tallies_label)
+                    .unwrap_or_else(|| "HP1[none m:0] HP2[none m:0] U[none m:0]".to_string())
+            } else {
+                app.selected_allele_tally
+                    .as_ref()
+                    .map(selected_allele_tally_label)
+                    .unwrap_or_else(|| "alleles:none meth:0".to_string())
+            };
             format!(" SELECTED {position}  {tally} ")
         });
     let metrics = format!(
@@ -268,6 +276,33 @@ fn selected_position_label(contig: &str, selected_ref_pos: Option<u64>) -> Optio
 }
 
 fn selected_allele_tally_label(tally: &PositionAlleleTally) -> String {
+    let alleles = allele_tally_details_label(tally);
+    if alleles.is_empty() {
+        format!("alleles:none meth:{}", tally.methylated_read_count)
+    } else {
+        format!("alleles:{alleles} meth:{}", tally.methylated_read_count)
+    }
+}
+
+fn phase_allele_tallies_label(tallies: &PhasePositionAlleleTallies) -> String {
+    format!(
+        "HP1[{}] HP2[{}] U[{}]",
+        phase_allele_tally_label(&tallies.hp1),
+        phase_allele_tally_label(&tallies.hp2),
+        phase_allele_tally_label(&tallies.unphased),
+    )
+}
+
+fn phase_allele_tally_label(tally: &PositionAlleleTally) -> String {
+    let alleles = allele_tally_details_label(tally);
+    if alleles.is_empty() {
+        format!("none m:{}", tally.methylated_read_count)
+    } else {
+        format!("{alleles} m:{}", tally.methylated_read_count)
+    }
+}
+
+fn allele_tally_details_label(tally: &PositionAlleleTally) -> String {
     let mut alleles = Vec::new();
     for base in *b"ACGTN" {
         if let Some(count) = tally.base_counts.get(&base) {
@@ -289,11 +324,7 @@ fn selected_allele_tally_label(tally: &PositionAlleleTally) -> String {
         alleles.push(format!("+{}:{count}", String::from_utf8_lossy(sequence)));
     }
 
-    if alleles.is_empty() {
-        "alleles:none".to_string()
-    } else {
-        format!("alleles:{}", alleles.join(" "))
-    }
+    alleles.join(" ")
 }
 
 fn truncate_to_width(text: &str, width: usize) -> String {
@@ -331,13 +362,18 @@ fn fit_top_bar(
         );
     }
 
-    let identity_budget = if width < 40 { width / 2 } else { width * 2 / 5 };
+    let identity_budget = if selected_info.is_some() && width >= 40 {
+        width / 4
+    } else if width < 40 {
+        width / 2
+    } else {
+        width * 2 / 5
+    };
     let identity = truncate_to_width(identity, identity_budget.max(1).min(width));
     let remaining = width.saturating_sub(identity.len());
 
     if let Some(selected_info) = selected_info {
-        let metrics_reserve = (remaining / 5).min(metrics.len());
-        let selected_info = truncate_to_width(selected_info, remaining - metrics_reserve);
+        let selected_info = truncate_to_width(selected_info, remaining);
         let metrics = truncate_to_width(
             metrics,
             width.saturating_sub(identity.len() + selected_info.len()),
@@ -1140,6 +1176,21 @@ mod tests {
     }
 
     #[test]
+    fn top_bar_keeps_all_compact_phase_tallies_at_demo_width() {
+        let identity = " LOCUS  file:demo.sorted.bam  region:chrDemo:45-115 ";
+        let selected_info = " SELECTED chrDemo:60  HP1[A:3 m:2] HP2[-G:1 m:0] U[+GG:1 m:1] ";
+        let metrics = " mapq:all  reads:7  phase:tracks  scale:0.7 bp/col ";
+
+        let (_, selected_info, _, _) =
+            fit_top_bar(identity, Some(selected_info), metrics, None, 110);
+        let selected_info = selected_info.expect("selection remains visible");
+
+        assert!(selected_info.contains("HP1[A:3 m:2]"));
+        assert!(selected_info.contains("HP2[-G:1 m:0]"));
+        assert!(selected_info.contains("U[+GG:1 m:1]"));
+    }
+
+    #[test]
     fn methylation_mode_label_reflects_toggle_state() {
         assert_eq!(methylation_mode_label(false), "meth:off");
         assert_eq!(methylation_mode_label(true), "meth:on");
@@ -1403,15 +1454,41 @@ mod tests {
             deletion_counts: BTreeMap::from([(b"ACT".to_vec(), 2)]),
             deletion_count: 1,
             insertion_counts: BTreeMap::from([(b"GG".to_vec(), 1)]),
+            methylated_read_count: 2,
         };
 
         assert_eq!(
             selected_allele_tally_label(&tally),
-            "alleles:A:3 C:1 -ACT:2 DEL:1 +GG:1"
+            "alleles:A:3 C:1 -ACT:2 DEL:1 +GG:1 meth:2"
         );
         assert_eq!(
             selected_allele_tally_label(&PositionAlleleTally::default()),
-            "alleles:none"
+            "alleles:none meth:0"
+        );
+    }
+
+    #[test]
+    fn phase_allele_tallies_label_groups_all_selected_position_counts() {
+        let tallies = PhasePositionAlleleTallies {
+            hp1: PositionAlleleTally {
+                base_counts: BTreeMap::from([(b'A', 3)]),
+                methylated_read_count: 2,
+                ..PositionAlleleTally::default()
+            },
+            hp2: PositionAlleleTally {
+                deletion_counts: BTreeMap::from([(b"G".to_vec(), 1)]),
+                ..PositionAlleleTally::default()
+            },
+            unphased: PositionAlleleTally {
+                insertion_counts: BTreeMap::from([(b"GG".to_vec(), 1)]),
+                methylated_read_count: 1,
+                ..PositionAlleleTally::default()
+            },
+        };
+
+        assert_eq!(
+            phase_allele_tallies_label(&tallies),
+            "HP1[A:3 m:2] HP2[-G:1 m:0] U[+GG:1 m:1]"
         );
     }
 

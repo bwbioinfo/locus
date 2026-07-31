@@ -92,6 +92,16 @@ pub struct PositionAlleleTally {
     /// Deletions whose reference sequence was not available in the cached slice.
     pub deletion_count: usize,
     pub insertion_counts: BTreeMap<Vec<u8>, usize>,
+    /// Reads with one or more modified-base calls aligned at this position.
+    pub methylated_read_count: usize,
+}
+
+/// Allele tallies separated by haplotype for a selected reference position.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhasePositionAlleleTallies {
+    pub hp1: PositionAlleleTally,
+    pub hp2: PositionAlleleTally,
+    pub unphased: PositionAlleleTally,
 }
 
 impl PositionAlleleTally {
@@ -112,6 +122,10 @@ impl PositionAlleleTally {
         } else {
             self.deletion_count += 1;
         }
+    }
+
+    fn add_methylated_read(&mut self) {
+        self.methylated_read_count += 1;
     }
 }
 
@@ -169,6 +183,14 @@ impl RenderRead {
         tally: &mut PositionAlleleTally,
         unresolved_deletions: &mut BTreeMap<(u64, u64), usize>,
     ) {
+        if self
+            .aligned_methylation()
+            .iter()
+            .any(|call| call.ref_pos == Some(position))
+        {
+            tally.add_methylated_read();
+        }
+
         let mut read_pos = 0usize;
         let mut ref_pos = self.start;
         let mut deletion_idx = 0usize;
@@ -397,9 +419,44 @@ impl RegionCache {
     /// This intentionally does not use `pileup_rows`: row capacity is a display concern and
     /// should not change a position's allele tally.
     pub fn allele_tally_at(&self, position: u64, min_mapq: u8) -> PositionAlleleTally {
+        self.allele_tally_at_filtered(position, min_mapq, &|_| true)
+    }
+
+    /// Count read alleles at `position` independently for each phase group.
+    pub fn phase_allele_tallies_at(
+        &self,
+        position: u64,
+        min_mapq: u8,
+    ) -> PhasePositionAlleleTallies {
+        PhasePositionAlleleTallies {
+            hp1: self.allele_tally_at_filtered(position, min_mapq, &|read| {
+                read.phase.haplotype == Some(1)
+            }),
+            hp2: self.allele_tally_at_filtered(position, min_mapq, &|read| {
+                read.phase.haplotype == Some(2)
+            }),
+            unphased: self.allele_tally_at_filtered(position, min_mapq, &|read| {
+                !matches!(read.phase.haplotype, Some(1) | Some(2))
+            }),
+        }
+    }
+
+    fn allele_tally_at_filtered<F>(
+        &self,
+        position: u64,
+        min_mapq: u8,
+        include: &F,
+    ) -> PositionAlleleTally
+    where
+        F: Fn(&RenderRead) -> bool,
+    {
         let mut tally = PositionAlleleTally::default();
         let mut unresolved_deletions = BTreeMap::new();
-        for read in self.reads.iter().filter(|read| read.mapq >= min_mapq) {
+        for read in self
+            .reads
+            .iter()
+            .filter(|read| read.mapq >= min_mapq && include(read))
+        {
             read.tally_alleles_at(
                 position,
                 self.reference.as_ref(),
@@ -410,7 +467,9 @@ impl RegionCache {
 
         for ((start, len), count) in unresolved_deletions {
             let end = start.saturating_add(len);
-            let Some(sequence) = self.pileup_consensus_sequence(start, end, min_mapq) else {
+            let Some(sequence) =
+                self.pileup_consensus_sequence_filtered(start, end, min_mapq, include)
+            else {
                 continue;
             };
             tally.deletion_count = tally.deletion_count.saturating_sub(count);
@@ -422,11 +481,24 @@ impl RegionCache {
     }
 
     /// Infer absent deleted reference bases from reads that align across the deletion span.
-    fn pileup_consensus_sequence(&self, start: u64, end: u64, min_mapq: u8) -> Option<Vec<u8>> {
+    fn pileup_consensus_sequence_filtered<F>(
+        &self,
+        start: u64,
+        end: u64,
+        min_mapq: u8,
+        include: &F,
+    ) -> Option<Vec<u8>>
+    where
+        F: Fn(&RenderRead) -> bool,
+    {
         (start..end)
             .map(|position| {
                 let mut counts = BTreeMap::new();
-                for read in self.reads.iter().filter(|read| read.mapq >= min_mapq) {
+                for read in self
+                    .reads
+                    .iter()
+                    .filter(|read| read.mapq >= min_mapq && include(read))
+                {
                     let Some(base) = read.base_at_reference_position(position) else {
                         continue;
                     };
@@ -693,6 +765,47 @@ mod tests {
             insertion_tally.insertion_counts.get(b"GG" as &[u8]),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn phase_allele_tallies_group_indels_and_deduplicated_methylation() {
+        let mut hp1 = make_read("hp1", 100, 103);
+        hp1.sequence = b"CAA".to_vec();
+        hp1.phase.haplotype = Some(1);
+        let mut hydroxymethylated = methylated_call(0);
+        hydroxymethylated.modification = "h".to_string();
+        hp1.methylation = vec![methylated_call(0), hydroxymethylated];
+
+        let mut hp2 = make_read("hp2", 100, 103);
+        hp2.cigar_ops = vec![CigarOp::Deletion(1), CigarOp::Match(2)];
+        hp2.sequence = b"AA".to_vec();
+        hp2.phase.haplotype = Some(2);
+
+        let mut unphased = make_read("unphased", 100, 103);
+        unphased.cigar_ops = vec![CigarOp::Match(1), CigarOp::Insertion(2), CigarOp::Match(2)];
+        unphased.sequence = b"CGGAA".to_vec();
+        unphased.methylation = vec![methylated_call(0)];
+
+        let cache = RegionCache {
+            reads: vec![hp1, hp2, unphased],
+            ..RegionCache::default()
+        };
+
+        let tallies = cache.phase_allele_tallies_at(100, 0);
+        let combined = cache.allele_tally_at(100, 0);
+
+        assert_eq!(combined.methylated_read_count, 2);
+        assert_eq!(tallies.hp1.base_counts.get(&b'C'), Some(&1));
+        assert_eq!(tallies.hp1.methylated_read_count, 1);
+        assert!(tallies.hp2.deletion_counts.is_empty());
+        assert_eq!(tallies.hp2.deletion_count, 1);
+        assert_eq!(tallies.hp2.methylated_read_count, 0);
+        assert_eq!(tallies.unphased.base_counts.get(&b'C'), Some(&1));
+        assert_eq!(
+            tallies.unphased.insertion_counts.get(b"GG" as &[u8]),
+            Some(&1)
+        );
+        assert_eq!(tallies.unphased.methylated_read_count, 1);
     }
 
     #[test]

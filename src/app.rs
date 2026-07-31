@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::{
     bam::BamSource,
-    cache::{PositionAlleleTally, RegionCache},
+    cache::{PhasePositionAlleleTallies, PositionAlleleTally, RegionCache},
     gff::GffStore,
     reference::ReferenceStore,
     region::{Region, parse_region},
@@ -96,6 +96,8 @@ pub struct App {
     pub selected_ref_pos: Option<u64>,
     /// Alleles observed at the selected reference position under the active MAPQ filter.
     pub selected_allele_tally: Option<PositionAlleleTally>,
+    /// Phase-separated alleles observed at the selected reference position.
+    pub selected_phase_allele_tallies: Option<PhasePositionAlleleTallies>,
     pub show_selection_brackets: bool,
     pub show_methylation: bool,
     pub show_phasing: bool,
@@ -166,6 +168,7 @@ impl App {
             selected_insertion_ref_pos: None,
             selected_ref_pos: None,
             selected_allele_tally: None,
+            selected_phase_allele_tallies: None,
             show_selection_brackets: true,
             show_methylation: false,
             show_phasing: false,
@@ -818,12 +821,20 @@ impl App {
     fn clear_selected_reference_position(&mut self) {
         self.selected_ref_pos = None;
         self.selected_allele_tally = None;
+        self.selected_phase_allele_tallies = None;
     }
 
     fn refresh_selected_allele_tally(&mut self) {
-        self.selected_allele_tally = self
-            .selected_ref_pos
-            .map(|position| self.cache.allele_tally_at(position, self.min_mapq));
+        let Some(position) = self.selected_ref_pos else {
+            self.selected_allele_tally = None;
+            self.selected_phase_allele_tallies = None;
+            return;
+        };
+
+        self.selected_allele_tally = Some(self.cache.allele_tally_at(position, self.min_mapq));
+        self.selected_phase_allele_tallies = self
+            .show_phasing
+            .then(|| self.cache.phase_allele_tallies_at(position, self.min_mapq));
     }
 }
 
@@ -920,6 +931,30 @@ mod tests {
         assert!(app.cache.phase_layout.is_none());
         assert_eq!(app.cache.pileup_rows, combined_rows);
         assert_eq!(app.status_msg.as_deref(), Some("phasing hidden"));
+    }
+
+    #[test]
+    fn selected_tally_switches_to_phase_groups_with_phasing_enabled() {
+        let mut app = demo_app(0);
+        app.view_start = 0;
+        app.view_end = 10;
+        let mut hp1 = read_with_insertion("hp1", 1);
+        hp1.phase.haplotype = Some(1);
+        app.cache.reads = vec![hp1];
+
+        app.select_reference_position(0);
+        assert!(app.selected_allele_tally.is_some());
+        assert!(app.selected_phase_allele_tallies.is_none());
+
+        app.show_phasing = true;
+        app.refresh_selected_allele_tally();
+
+        assert_eq!(
+            app.selected_phase_allele_tallies
+                .as_ref()
+                .and_then(|tallies| tallies.hp1.base_counts.get(&b'A')),
+            Some(&1)
+        );
     }
 
     #[test]

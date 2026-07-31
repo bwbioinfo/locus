@@ -152,6 +152,7 @@ Methylation display:
 - Press `m` to show or hide modified-base calls parsed from SAM/BAM `MM` tags.
 - `ML` probabilities are used when present: high-confidence modified calls are highlighted more strongly, low-confidence calls use a dimmer treatment, and calls without `ML` are underlined.
 - Calls are rendered on aligned read bases after CIGAR mapping; soft-clipped or inserted bases are parsed but not drawn as reference-aligned methylation marks.
+- The selected-position summary reports `meth:n` for reads with modified-base calls at that reference position. With phase tracks enabled, it groups all base, indel, and methylation tallies as `HP1[...] HP2[...] U[...]`, where `U` is unphased.
 
 The demo BAM includes forward and reverse-strand MM/ML calls so the `m` toggle visibly changes the read pileup.
 
