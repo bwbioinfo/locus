@@ -75,6 +75,8 @@ pub struct RenderRead {
     /// ASCII-decoded read sequence (A/C/G/T/N), read-coordinate indexed.
     pub sequence: Vec<u8>,
     pub methylation: Vec<ModifiedBaseCall>,
+    /// Deleted reference alleles from the MD tag, in CIGAR deletion order.
+    pub deleted_reference_sequences: Vec<Vec<u8>>,
     pub phase: ReadPhase,
     pub is_secondary: bool,
     pub is_supplementary: bool,
@@ -168,6 +170,7 @@ impl RenderRead {
     ) {
         let mut read_pos = 0usize;
         let mut ref_pos = self.start;
+        let mut deletion_idx = 0usize;
 
         for &op in &self.cigar_ops {
             match op {
@@ -204,13 +207,21 @@ impl RenderRead {
                 CigarOp::Deletion(n) => {
                     let end = ref_pos.saturating_add(n);
                     if (ref_pos..end).contains(&position) {
-                        let sequence = reference.and_then(|reference| {
-                            (ref_pos..end)
-                                .map(|deleted_pos| reference.base_at(deleted_pos))
-                                .collect::<Option<Vec<_>>>()
-                        });
+                        let sequence = reference
+                            .and_then(|reference| {
+                                (ref_pos..end)
+                                    .map(|deleted_pos| reference.base_at(deleted_pos))
+                                    .collect::<Option<Vec<_>>>()
+                            })
+                            .or_else(|| {
+                                self.deleted_reference_sequences
+                                    .get(deletion_idx)
+                                    .filter(|sequence| sequence.len() == n as usize)
+                                    .cloned()
+                            });
                         tally.add_deletion(sequence);
                     }
+                    deletion_idx += 1;
                     ref_pos = end;
                 }
                 // A CIGAR skip is an intron or other reference skip, not an indel allele.
@@ -494,6 +505,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(end - start)],
             sequence: vec![b'A'; len],
             methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
             phase: ReadPhase::default(),
             is_secondary: false,
             is_supplementary: false,
@@ -623,6 +635,24 @@ mod tests {
             insertion_tally.insertion_counts.get(b"GG" as &[u8]),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn allele_tally_uses_md_deleted_sequence_without_a_reference_slice() {
+        let mut deleted = make_read("deleted", 100, 106);
+        deleted.cigar_ops = vec![CigarOp::Match(1), CigarOp::Deletion(4), CigarOp::Match(1)];
+        deleted.sequence = b"AC".to_vec();
+        deleted.deleted_reference_sequences = vec![b"ATCG".to_vec()];
+
+        let cache = RegionCache {
+            reads: vec![deleted],
+            ..RegionCache::default()
+        };
+
+        let tally = cache.allele_tally_at(101, 0);
+
+        assert_eq!(tally.deletion_counts.get(b"ATCG" as &[u8]), Some(&1));
+        assert_eq!(tally.deletion_count, 0);
     }
 
     #[test]

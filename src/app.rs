@@ -700,6 +700,7 @@ mod tests {
             cigar_ops: vec![crate::cache::CigarOp::Match(3)],
             sequence: b"AAA".to_vec(),
             methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
             phase: Default::default(),
             is_secondary: false,
             is_supplementary: false,

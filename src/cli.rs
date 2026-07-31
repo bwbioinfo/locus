@@ -17,7 +17,7 @@ pub struct Args {
     #[arg(long, short = 'a')]
     pub gff: Option<String>,
 
-    /// Reference FASTA for the reference track and mismatch coloring
+    /// Reference FASTA for the reference track, mismatch coloring, and deleted-allele recovery
     #[arg(long, short = 'f')]
     pub reference: Option<String>,
 

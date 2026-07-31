@@ -1058,6 +1058,7 @@ mod tests {
             cigar_ops: vec![CigarOp::Match(10)],
             sequence: b"AAAAAAAAAA".to_vec(),
             methylation: Vec::new(),
+            deleted_reference_sequences: Vec::new(),
             phase: ReadPhase {
                 haplotype: Some(1),
                 phase_set,
