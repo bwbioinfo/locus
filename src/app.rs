@@ -406,24 +406,29 @@ impl App {
     }
 
     pub fn zoom_in(&mut self) {
-        let center = (self.view_start + self.view_end) / 2;
+        let center = self.zoom_center();
         let half_span = (self.view_span() / 4).max(50);
         self.view_start = center.saturating_sub(half_span);
         self.view_end = center + half_span;
         self.bp_per_col = (self.view_span() as f64 / self.view_cols() as f64).max(MIN_BP_PER_COL);
         self.clamp_view();
-        self.mark_dirty(true);
+        self.mark_dirty(false);
     }
 
     pub fn zoom_out(&mut self) {
-        let center = (self.view_start + self.view_end) / 2;
+        let center = self.zoom_center();
         let half_span = (self.view_span()).min(MAX_BP_PER_COL as u64 * self.view_cols() as u64 / 2);
         let new_half = (half_span * 2).min(self.current_contig_len());
         self.view_start = center.saturating_sub(new_half / 2);
         self.view_end = center + new_half / 2;
         self.bp_per_col = (self.view_span() as f64 / self.view_cols() as f64).max(MIN_BP_PER_COL);
         self.clamp_view();
-        self.mark_dirty(true);
+        self.mark_dirty(false);
+    }
+
+    fn zoom_center(&self) -> u64 {
+        self.selected_ref_pos
+            .unwrap_or_else(|| (self.view_start + self.view_end) / 2)
     }
 
     /// If the new view is within the cached padded region, just re-layout without disk IO.
@@ -956,6 +961,30 @@ mod tests {
         app.pan(-20);
 
         assert_eq!(app.selected_ref_pos, Some(selected));
+    }
+
+    #[test]
+    fn zooming_preserves_and_centers_the_selected_base_without_refetching() {
+        let mut app = demo_app(0);
+        app.source.contigs[0].length = 10_000;
+        app.view_start = 100;
+        app.view_end = 1_100;
+        app.cache.loaded_region = Some(Region::new("chrDemo", 0, 10_000));
+        app.needs_fetch = false;
+        app.select_reference_position(200);
+
+        app.zoom_in();
+
+        assert_eq!(app.selected_ref_pos, Some(200));
+        assert!((app.view_start..app.view_end).contains(&200));
+        assert_eq!(app.view_start, 0);
+        assert!(!app.needs_fetch);
+
+        app.zoom_out();
+
+        assert_eq!(app.selected_ref_pos, Some(200));
+        assert!((app.view_start..app.view_end).contains(&200));
+        assert!(!app.needs_fetch);
     }
 
     #[test]
